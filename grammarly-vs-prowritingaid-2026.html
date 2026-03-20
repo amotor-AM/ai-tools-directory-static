@@ -206,6 +206,44 @@
         .recommendation { background: #f0fff4; border-left: 4px solid #00a86b; padding: 15px 20px; margin: 15px 0; }
         .feature-grid { font-size: 0.9em; }
         .feature-grid td:first-child { font-weight: 500; }
+    
+        /* Responsive table wrapper */
+        .table-wrapper {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 2em 0;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+        }
+        
+        /* Mobile table improvements */
+        @media (max-width: 768px) {
+            table {
+                font-size: 0.8em;
+                margin: 0;
+            }
+            th, td {
+                padding: 8px 6px;
+                white-space: nowrap;
+            }
+            th {
+                position: sticky;
+                left: 0;
+                background: #3498db;
+                z-index: 1;
+            }
+            td:first-child {
+                position: sticky;
+                left: 0;
+                background: white;
+                font-weight: 600;
+                z-index: 1;
+            }
+            tr:hover td:first-child {
+                background: #f5f5f5;
+            }
+        }
+
     </style>
 </head>
 <body>
@@ -222,7 +260,8 @@
 
         <h2>Quick Comparison Table</h2>
 
-        <table>
+        <div class="table-wrapper">
+<table>
             <thead>
                 <tr>
                     <th>Factor</th>
@@ -288,6 +327,7 @@
                 </tr>
             </tbody>
         </table>
+</div>
 
         <h2>The Paradox: Both Tools Are Excellent</h2>
 
@@ -320,7 +360,8 @@
 
         <h2>Pricing Breakdown: ProWritingAid Wins Long-Term</h2>
 
-        <table>
+        <div class="table-wrapper">
+<table>
             <thead>
                 <tr>
                     <th>Plan</th>
@@ -361,6 +402,7 @@
                 </tr>
             </tbody>
         </table>
+</div>
 
         <h3>Break-Even Analysis</h3>
 
@@ -434,7 +476,8 @@
 
         <p>This is ProWritingAid's killer feature. Each report analyzes one dimension of your writing:</p>
 
-        <table class="feature-grid">
+        <div class="table-wrapper">
+<table class="feature-grid">
             <thead>
                 <tr>
                     <th>Report</th>
@@ -471,6 +514,7 @@
                 <tr><td>Combo Reports</td><td>Create custom report combining your favorites</td><td>Power users</td></tr>
             </tbody>
         </table>
+</div>
 
         <p><strong>Reality check:</strong> You won't use all 25 reports. I found myself running 5-7 regularly (Summary, Pacing, Echoes, Dialogue, Readability, Sticky Sentences, Overused). That's still 5x more depth than Grammarly's single report.</p>
 
@@ -480,7 +524,8 @@
 
         <h2>Complete Feature Comparison Grid (30+ Features)</h2>
 
-        <table class="feature-grid">
+        <div class="table-wrapper">
+<table class="feature-grid">
             <thead>
                 <tr>
                     <th>Feature</th>
@@ -524,6 +569,7 @@
                 <tr><td>Short-Form Speed (emails, Slack)</td><td>⭐⭐⭐⭐⭐ Instant</td><td>⭐⭐⭐ Slower</td><td class="winner">Grammarly</td></tr>
             </tbody>
         </table>
+</div>
 
         <h2>Writer Type Matching: Which Tool for You?</h2>
 
@@ -794,7 +840,8 @@
 
         <h3>Mobile App Comparison</h3>
 
-        <table>
+        <div class="table-wrapper">
+<table>
             <thead>
                 <tr>
                     <th>Feature</th>
@@ -830,6 +877,7 @@
                 </tr>
             </tbody>
         </table>
+</div>
 
         <p><strong>Bottom line:</strong> If you write 20%+ of your content on mobile (emails, social posts, notes), Grammarly is non-negotiable. ProWritingAid has no mobile solution.</p>
 
@@ -837,7 +885,8 @@
 
         <p>If you're managing a writing team (marketing agency, content team, editorial staff), Grammarly is built for you. ProWritingAid is designed for individual writers.</p>
 
-        <table>
+        <div class="table-wrapper">
+<table>
             <thead>
                 <tr>
                     <th>Feature</th>
@@ -883,6 +932,7 @@
                 </tr>
             </tbody>
         </table>
+</div>
 
         <p><strong>Use case example:</strong> Marketing agency with 10 writers needs consistent brand voice across 200+ client emails/month. Grammarly's shared style guide ensures everyone writes "log in" (not "login") and uses Oxford commas. ProWritingAid can't enforce team-wide consistency.</p>
 
@@ -930,7 +980,8 @@
 
         <p>There is no universal winner. The right tool depends entirely on your writing type, workflow, and budget.</p>
 
-        <table>
+        <div class="table-wrapper">
+<table>
             <thead>
                 <tr>
                     <th>Your Profile</th>
@@ -1001,6 +1052,7 @@
                 </tr>
             </tbody>
         </table>
+</div>
 
         <h3>My Personal Setup</h3>
 

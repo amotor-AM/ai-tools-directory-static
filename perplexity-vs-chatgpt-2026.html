@@ -141,6 +141,44 @@
             font-size: 0.95rem;
             margin-bottom: 30px;
         }
+    
+        /* Responsive table wrapper */
+        .table-wrapper {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 2em 0;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+        }
+        
+        /* Mobile table improvements */
+        @media (max-width: 768px) {
+            table {
+                font-size: 0.8em;
+                margin: 0;
+            }
+            th, td {
+                padding: 8px 6px;
+                white-space: nowrap;
+            }
+            th {
+                position: sticky;
+                left: 0;
+                background: #3498db;
+                z-index: 1;
+            }
+            td:first-child {
+                position: sticky;
+                left: 0;
+                background: white;
+                font-weight: 600;
+                z-index: 1;
+            }
+            tr:hover td:first-child {
+                background: #f5f5f5;
+            }
+        }
+
     </style>
 </head>
 <body>
@@ -165,7 +203,8 @@
 
         <h2>Quick Comparison: Perplexity vs ChatGPT at a Glance</h2>
 
-        <table>
+        <div class="table-wrapper">
+<table>
             <thead>
                 <tr>
                     <th>Feature</th>
@@ -267,6 +306,7 @@
                 </tr>
             </tbody>
         </table>
+</div>
 
         <h2>What is Perplexity AI? The AI-Powered Answer Engine</h2>
 
@@ -464,7 +504,8 @@
 
         <h3>Free Plans</h3>
 
-        <table>
+        <div class="table-wrapper">
+<table>
             <thead>
                 <tr>
                     <th>Feature</th>
@@ -490,12 +531,14 @@
                 </tr>
             </tbody>
         </table>
+</div>
 
         <p><strong>Winner:</strong> Perplexity Free offers better value with included web search and citations.</p>
 
         <h3>$20/Month Plans</h3>
 
-        <table>
+        <div class="table-wrapper">
+<table>
             <thead>
                 <tr>
                     <th>Feature</th>
@@ -526,6 +569,7 @@
                 </tr>
             </tbody>
         </table>
+</div>
 
         <p><strong>Winner:</strong> Depends on use case—Perplexity for researchers, ChatGPT for creators/developers.</p>
 
@@ -584,7 +628,8 @@
 
         <h2>Real-World Use Case Matrix</h2>
 
-        <table>
+        <div class="table-wrapper">
+<table>
             <thead>
                 <tr>
                     <th>Task</th>
@@ -655,6 +700,7 @@
                 </tr>
             </tbody>
         </table>
+</div>
 
         <h2>Frequently Asked Questions</h2>
 

@@ -261,6 +261,44 @@
                 padding: 8px;
             }
         }
+    
+        /* Responsive table wrapper */
+        .table-wrapper {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 2em 0;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+        }
+        
+        /* Mobile table improvements */
+        @media (max-width: 768px) {
+            table {
+                font-size: 0.8em;
+                margin: 0;
+            }
+            th, td {
+                padding: 8px 6px;
+                white-space: nowrap;
+            }
+            th {
+                position: sticky;
+                left: 0;
+                background: #3498db;
+                z-index: 1;
+            }
+            td:first-child {
+                position: sticky;
+                left: 0;
+                background: white;
+                font-weight: 600;
+                z-index: 1;
+            }
+            tr:hover td:first-child {
+                background: #f5f5f5;
+            }
+        }
+
     </style>
 </head>
 <body>
@@ -306,6 +344,7 @@
 
 <h2>Quick Comparison Table: ChatGPT vs Copilot 2026</h2>
 
+<div class="table-wrapper">
 <table>
     <thead>
         <tr>
@@ -382,6 +421,7 @@
         </tr>
     </tbody>
 </table>
+</div>
 
 <h2>The Key Similarities: Don't Bury the Lede</h2>
 

@@ -144,6 +144,44 @@
                 font-size: 0.9em;
             }
         }
+    
+        /* Responsive table wrapper */
+        .table-wrapper {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 2em 0;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+        }
+        
+        /* Mobile table improvements */
+        @media (max-width: 768px) {
+            table {
+                font-size: 0.8em;
+                margin: 0;
+            }
+            th, td {
+                padding: 8px 6px;
+                white-space: nowrap;
+            }
+            th {
+                position: sticky;
+                left: 0;
+                background: #3498db;
+                z-index: 1;
+            }
+            td:first-child {
+                position: sticky;
+                left: 0;
+                background: white;
+                font-weight: 600;
+                z-index: 1;
+            }
+            tr:hover td:first-child {
+                background: #f5f5f5;
+            }
+        }
+
     </style>
 </head>
 <body>
@@ -179,7 +217,8 @@
         </div>
 
         <h2>Quick Comparison Table</h2>
-        <table>
+        <div class="table-wrapper">
+<table>
             <thead>
                 <tr>
                     <th>Feature</th>
@@ -264,6 +303,7 @@
                 </tr>
             </tbody>
         </table>
+</div>
 
         <h2>What is Google Gemini?</h2>
         <p>Google Gemini is Google's flagship AI assistant, launched as the company's response to ChatGPT's dominance. After iterating through Gemini 1 and 2, Google released <strong>Gemini 3 Pro in early 2026</strong>, which hit #1 on the LMArena leaderboard with an Elo rating around 1501—making it the top-ranked conversational AI model at the time.</p>
@@ -529,7 +569,8 @@
         </div>
 
         <h3>Individual Users: Essentially Tied</h3>
-        <table>
+        <div class="table-wrapper">
+<table>
             <tr>
                 <th>Tool</th>
                 <th>Monthly Cost</th>
@@ -546,6 +587,7 @@
                 <td>GPT-5, Claude access, multi-model flexibility</td>
             </tr>
         </table>
+</div>
 
         <p><strong>Difference: $0.01/month</strong> — essentially tied. For individual users, cost isn't a differentiator.</p>
 
@@ -569,7 +611,8 @@
         </ul>
 
         <h3>Real-World Cost Comparison: 50-Person Company</h3>
-        <table>
+        <div class="table-wrapper">
+<table>
             <tr>
                 <th>Scenario</th>
                 <th>Monthly Cost</th>
@@ -596,6 +639,7 @@
                 <td><strong>$13,506 to $29,406</strong></td>
             </tr>
         </table>
+</div>
 
         <p>For a 50-person company, choosing Gemini over Copilot saves between <strong>$13,506 and $29,406 per year</strong>. Scale that to 100 users and you're looking at $27,000 to $59,000 in annual savings.</p>
 

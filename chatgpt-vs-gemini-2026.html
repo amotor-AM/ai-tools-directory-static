@@ -207,6 +207,44 @@
                 display: none;
             }
         }
+    
+        /* Responsive table wrapper */
+        .table-wrapper {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 2em 0;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+        }
+        
+        /* Mobile table improvements */
+        @media (max-width: 768px) {
+            table {
+                font-size: 0.8em;
+                margin: 0;
+            }
+            th, td {
+                padding: 8px 6px;
+                white-space: nowrap;
+            }
+            th {
+                position: sticky;
+                left: 0;
+                background: #3498db;
+                z-index: 1;
+            }
+            td:first-child {
+                position: sticky;
+                left: 0;
+                background: white;
+                font-weight: 600;
+                z-index: 1;
+            }
+            tr:hover td:first-child {
+                background: #f5f5f5;
+            }
+        }
+
     </style>
 </head>
 <body>
@@ -227,7 +265,8 @@
             <p><strong>ChatGPT wins for coding and creative writing.</strong> Gemini wins for video analysis and Google Workspace integration. Both are $8/month, but Gemini includes Google Drive storage (better value).</p>
 
             <div class="comparison-table">
-                <table>
+                <div class="table-wrapper">
+<table>
                     <thead>
                         <tr>
                             <th>Category</th>
@@ -278,6 +317,7 @@
                         </tr>
                     </tbody>
                 </table>
+</div>
             </div>
         </div>
 
@@ -388,7 +428,8 @@
         <h3>Pricing & Value</h3>
 
         <div class="comparison-table">
-            <table>
+            <div class="table-wrapper">
+<table>
                 <thead>
                     <tr>
                         <th>Tier</th>
@@ -414,6 +455,7 @@
                     </tr>
                 </tbody>
             </table>
+</div>
         </div>
 
         <p><strong>Winner: Gemini (better value)</strong></p>

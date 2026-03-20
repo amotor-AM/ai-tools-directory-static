@@ -127,6 +127,44 @@
             border-radius: 6px;
             margin: 15px 0;
         }
+    
+        /* Responsive table wrapper */
+        .table-wrapper {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 2em 0;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+        }
+        
+        /* Mobile table improvements */
+        @media (max-width: 768px) {
+            table {
+                font-size: 0.8em;
+                margin: 0;
+            }
+            th, td {
+                padding: 8px 6px;
+                white-space: nowrap;
+            }
+            th {
+                position: sticky;
+                left: 0;
+                background: #3498db;
+                z-index: 1;
+            }
+            td:first-child {
+                position: sticky;
+                left: 0;
+                background: white;
+                font-weight: 600;
+                z-index: 1;
+            }
+            tr:hover td:first-child {
+                background: #f5f5f5;
+            }
+        }
+
     </style>
 </head>
 <body>
@@ -160,6 +198,7 @@
 
 <p>Both tools charge the same headline price, but what's included differs significantly:</p>
 
+<div class="table-wrapper">
 <table>
     <thead>
         <tr>
@@ -191,6 +230,7 @@
         </tr>
     </tbody>
 </table>
+</div>
 
 <div class="highlight-box">
     <strong>💡 Budget Tip:</strong> If you only need light AI usage (50-100 messages/month), ChatGPT's $8/month Go plan offers excellent value. Claude has no equivalent mid-tier option—it's either free (limited) or $20/month.
@@ -282,6 +322,7 @@
 
 <h3>Writing Quality Use Case Matrix</h3>
 
+<div class="table-wrapper">
 <table>
     <thead>
         <tr>
@@ -323,6 +364,7 @@
         </tr>
     </tbody>
 </table>
+</div>
 
 <h2>Multimedia Features: ChatGPT's Decisive Advantage</h2>
 
@@ -341,6 +383,7 @@
 
 <p>Text. That's it. Claude does image analysis (you can upload images and ask questions), but it cannot generate images, videos, or audio.</p>
 
+<div class="table-wrapper">
 <table>
     <thead>
         <tr>
@@ -377,6 +420,7 @@
         </tr>
     </tbody>
 </table>
+</div>
 
 <div class="highlight-box">
     <strong>⚡ Real-World Impact:</strong> If you're a content creator, marketer, or designer, ChatGPT's multimedia features alone may justify the subscription. For writers and developers who work primarily in text, Claude's limitations don't matter.
@@ -391,6 +435,7 @@
     <li>Maintaining coherence across multi-hour conversations</li>
 </ul>
 
+<div class="table-wrapper">
 <table>
     <thead>
         <tr>
@@ -417,6 +462,7 @@
         </tr>
     </tbody>
 </table>
+</div>
 
 <p><strong>Claude's 200K token window</strong> means you can upload an entire novel (~100K words) and ask nuanced questions about characters, themes, and plot consistency. ChatGPT's 128K limit still handles most use cases but may truncate the largest documents.</p>
 
@@ -479,6 +525,7 @@
 
 <p>Beyond speed, the tools have distinct interaction styles:</p>
 
+<div class="table-wrapper">
 <table>
     <thead>
         <tr>
@@ -510,6 +557,7 @@
         </tr>
     </tbody>
 </table>
+</div>
 
 <p>Claude's tendency to ask clarifying questions frustrates some users but improves output quality for complex tasks. ChatGPT's literal obedience is faster but occasionally misinterprets intent.</p>
 

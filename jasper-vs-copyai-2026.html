@@ -297,6 +297,44 @@
             font-style: italic;
             margin-bottom: 20px;
         }
+    
+        /* Responsive table wrapper */
+        .table-wrapper {
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            margin: 2em 0;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+        }
+        
+        /* Mobile table improvements */
+        @media (max-width: 768px) {
+            table {
+                font-size: 0.8em;
+                margin: 0;
+            }
+            th, td {
+                padding: 8px 6px;
+                white-space: nowrap;
+            }
+            th {
+                position: sticky;
+                left: 0;
+                background: #3498db;
+                z-index: 1;
+            }
+            td:first-child {
+                position: sticky;
+                left: 0;
+                background: white;
+                font-weight: 600;
+                z-index: 1;
+            }
+            tr:hover td:first-child {
+                background: #f5f5f5;
+            }
+        }
+
     </style>
 </head>
 <body>
@@ -334,6 +372,7 @@
 
 <p>Let's establish the baseline. Here's what you're actually comparing:</p>
 
+<div class="table-wrapper">
 <table>
     <thead>
         <tr>
@@ -376,6 +415,7 @@
         </tr>
     </tbody>
 </table>
+</div>
 
 <div class="highlight-box">
     <strong>💡 Reality Check:</strong> For a team of 3, choosing Jasper Pro over ChatGPT costs an additional <strong>$1,404/year</strong> ($207/month vs $60/month). That premium must save 28 hours annually (at $50/hour) just to break even. Does it?
@@ -447,6 +487,7 @@
 
 <p>Let's break down what you're actually paying for with the premium:</p>
 
+<div class="table-wrapper">
 <table>
     <thead>
         <tr>
@@ -519,6 +560,7 @@
         </tr>
     </tbody>
 </table>
+</div>
 
 <h3>Long-Form Content Quality: The Polished Draft Advantage</h3>
 
@@ -696,6 +738,7 @@
 
 <p>This is the critical insight: <strong>Premium tools lower the skill floor.</strong></p>
 
+<div class="table-wrapper">
 <table>
     <thead>
         <tr>
@@ -726,6 +769,7 @@
         </tr>
     </tbody>
 </table>
+</div>
 
 <p>If you're bad at prompting, Jasper's templates and structure get you to 75% quality with minimal effort. If you're good at prompting, ChatGPT gets you to 85% quality—close enough that the 3.5x cost premium isn't justified.</p>
 
@@ -749,6 +793,7 @@
 
 <p>Still unsure? Use this matrix to find your ideal tool:</p>
 
+<div class="table-wrapper">
 <table>
     <thead>
         <tr>
@@ -810,6 +855,7 @@
         </tr>
     </tbody>
 </table>
+</div>
 
 <h2>Real-World Testing: Quality Comparison</h2>
 
