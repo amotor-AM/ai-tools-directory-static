@@ -2,78 +2,120 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://amotor-am.github.io/ai-tools-directory-static/</loc>
-    <lastmod>2026-03-19</lastmod>
-    <changefreq>weekly</changefreq>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>daily</changefreq>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-data-analysis-tools-2026.html</loc>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/chatgpt-plus-vs-claude-pro-2026.html</loc>
     <lastmod>2026-03-21</lastmod>
     <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
+    <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://amotor-am.github.io/ai-tools-directory-static/chatgpt-vs-claude-2026.html</loc>
-    <lastmod>2026-03-19</lastmod>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-transcription-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
     <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
+    <priority>0.8</priority>
   </url>
   <url>
     <loc>https://amotor-am.github.io/ai-tools-directory-static/chatgpt-vs-copilot-2026.html</loc>
-    <lastmod>2026-03-19</lastmod>
+    <lastmod>2026-03-21</lastmod>
     <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
+    <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://amotor-am.github.io/ai-tools-directory-static/chatgpt-vs-deepseek-2026.html</loc>
-    <lastmod>2026-03-19</lastmod>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/is-midjourney-worth-it-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
     <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
+    <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://amotor-am.github.io/ai-tools-directory-static/chatgpt-vs-gemini-2026.html</loc>
-    <lastmod>2026-03-19</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
-  </url>
-  <url>
-    <loc>https://amotor-am.github.io/ai-tools-directory-static/claude-vs-gemini-2026.html</loc>
-    <lastmod>2026-03-19</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
-  </url>
-  <url>
-    <loc>https://amotor-am.github.io/ai-tools-directory-static/gemini-vs-copilot-2026.html</loc>
-    <lastmod>2026-03-19</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
-  </url>
-  <url>
-    <loc>https://amotor-am.github.io/ai-tools-directory-static/jasper-vs-copyai-2026.html</loc>
-    <lastmod>2026-03-19</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
-  </url>
-  <url>
-    <loc>https://amotor-am.github.io/ai-tools-directory-static/perplexity-vs-chatgpt-2026.html</loc>
-    <lastmod>2026-03-19</lastmod>
-    <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
-  </url>
-  <url>
-    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-video-generators-2026.html</loc>
-    <lastmod>2026-03-18</lastmod>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/chatgpt-vs-claude-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
   </url>
   <url>
     <loc>https://amotor-am.github.io/ai-tools-directory-static/midjourney-vs-stable-diffusion-2026.html</loc>
-    <lastmod>2026-03-19</lastmod>
+    <lastmod>2026-03-21</lastmod>
     <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
+    <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-project-management-tools-2026.html</loc>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/writesonic-vs-copyai-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-marketing-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-automation-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-note-taking-apps-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-video-generators-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/chatgpt-vs-deepseek-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-tools-for-content-creators-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/gemini-vs-copilot-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-grammar-checkers-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/jasper-vs-copyai-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-design-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-sales-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-tools-for-developers-2026.html</loc>
     <lastmod>2026-03-21</lastmod>
     <changefreq>monthly</changefreq>
     <priority>0.8</priority>
@@ -82,6 +124,174 @@
     <loc>https://amotor-am.github.io/ai-tools-directory-static/best-free-ai-tools-2026.html</loc>
     <lastmod>2026-03-21</lastmod>
     <changefreq>monthly</changefreq>
-    <priority>0.9</priority>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/perplexity-vs-chatgpt-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-seo-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/github-copilot-vs-cursor-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/is-chatgpt-plus-worth-it-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/grammarly-vs-prowritingaid-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-presentation-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-image-generators-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/chatgpt-vs-gemini-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-coding-assistants-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-project-management-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-customer-service-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-productivity-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-research-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-chatbots-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/claude-vs-gemini-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-tools-for-small-business-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-data-analysis-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/dalle-3-vs-midjourney-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-voice-generators-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-video-editing-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/best-ai-meeting-assistants-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/notion-ai-vs-chatgpt-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/is-claude-pro-worth-it-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/articles/best-ai-email-assistants-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/articles/best-ai-tools-for-developers-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/seo/articles/best-ai-sales-tools-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/seo/articles/best-ai-tools-for-developers-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://amotor-am.github.io/ai-tools-directory-static/seo/articles/grammarly-vs-prowritingaid-2026.html</loc>
+    <lastmod>2026-03-21</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.8</priority>
   </url>
 </urlset>
