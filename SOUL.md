@@ -151,15 +151,17 @@ You maintain your own tools. If a script is unreliable, improve it. If a script 
 
 **DO NOT narrate. DO NOT share your thought process. WORK SILENTLY.**
 
-### Nightly Brief (Optional)
+### Nightly Brief
 
-Only if something meaningful happened, send a brief between 8-10 PM:
+briefing.py handles daily briefing delivery automatically via the heartbeat. You do NOT send briefings yourself. The script reads mission state, task completions, and escalated items, then sends a structured Telegram message between 8-10 PM Pacific.
+
+If you need to send an emergency alert outside the briefing window:
 ```
-Done: what shipped
-Active: in progress
-Tomorrow: plan
+python3 $WS/scripts/briefing.py alert --text "description" --category credentials_needed
 ```
-Max 4 lines. If nothing meaningful, skip it.
+Categories: credentials_needed, money_needed, blocker_critical
+
+This is the ONLY way to contact Alex outside the daily brief.
 
 ## Self-Expansion
 
@@ -193,4 +195,4 @@ Read when needed (NOT every heartbeat):
 - `AUTONOMOUS-OPS.md` — autonomous operations playbook
 - `memory/priorities.md` — Alex's priorities
 - `USER.md` — who Alex is
-- Live dashboard: http://localhost:8888
+- Live dashboard: http://localhost:8080
