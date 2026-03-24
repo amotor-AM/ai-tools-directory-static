@@ -9,20 +9,29 @@ Requirement coverage:
   TestMissionLedger   → SUPV-01
   TestExecutionLedger → SUPV-02
   TestAuditLog        → SUPV-09
+
+Testing strategy:
+  - TestMissionLedger and TestAuditLog use subprocess (run_supervisor) since they
+    need real file I/O without mocking subprocess calls.
+  - TestExecutionLedger uses direct module imports so subprocess.run can be mocked
+    in-process (patching the subprocess calls to task_manager.py and heal.py).
 """
 
+import importlib
 import json
 import os
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, call
 
 import pytest
 
-# Add scripts/ to path so supervisor can be imported
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+# Add scripts/ to path so supervisor can be imported directly
+SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent / "scripts")
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -224,10 +233,51 @@ class TestMissionLedger:
 
 # ---------------------------------------------------------------------------
 # TestExecutionLedger — SUPV-02
+#
+# Uses direct module import (not subprocess) so subprocess.run can be mocked
+# in-process to prevent actual task_manager.py and heal.py calls.
 # ---------------------------------------------------------------------------
+
+def _import_supervisor():
+    """Import supervisor module fresh (respects current env vars)."""
+    import importlib
+    import supervisor as sup_module
+    # Reload so module-level env vars (EXEC_DIR, AUDIT_LOG_PATH) re-read from environ
+    importlib.reload(sup_module)
+    return sup_module
+
 
 class TestExecutionLedger:
     """Tests for validate-task subcommand (inner loop, SUPV-02)."""
+
+    def _run_validate(self, task_state_dir, tmp_path, task_id, result_json):
+        """Helper: run validate_task() directly with env isolation."""
+        audit_log = tmp_path / "supervisor.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir(exist_ok=True)
+
+        env_patch = {
+            "ARIA_TASK_DIR": str(task_state_dir),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        old_env = {}
+        for k, v in env_patch.items():
+            old_env[k] = os.environ.get(k)
+            os.environ[k] = v
+
+        try:
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0)
+                exit_code = sup.validate_task(task_id, result_json)
+                return exit_code, exec_dir, audit_log, mock_run
+        finally:
+            for k, old_v in old_env.items():
+                if old_v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old_v
 
     def test_validate_task_pass(self, task_state_dir, tmp_path):
         """Valid result JSON writes exec_ file with passed=True and calls task_manager.py complete."""
@@ -237,27 +287,18 @@ class TestExecutionLedger:
             "status": "success",
             "summary": "Task completed successfully",
         })
-        audit_log = tmp_path / "supervisor.jsonl"
-        exec_dir = tmp_path / "execution"
-        exec_dir.mkdir()
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = run_supervisor(
-                ["validate-task", "--task-id", task_id, "--result", result_json],
-                env={
-                    "ARIA_TASK_DIR": str(task_state_dir),
-                    "SUPERVISOR_AUDIT_LOG": str(audit_log),
-                    "SUPERVISOR_EXEC_DIR": str(exec_dir),
-                },
-            )
-
-        assert result.returncode == 0
-        # exec_ file should exist
+        exit_code, exec_dir, audit_log, mock_run = self._run_validate(
+            task_state_dir, tmp_path, task_id, result_json
+        )
+        assert exit_code == 0
         exec_file = exec_dir / f"exec_{task_id}.json"
         assert exec_file.exists(), f"exec_{task_id}.json not found in {exec_dir}"
         gate_result = json.loads(exec_file.read_text())
         assert gate_result["passed"] is True
+        # subprocess.run called with task_manager.py complete
+        assert mock_run.called
+        call_args = mock_run.call_args_list[0][0][0]
+        assert "complete" in call_args
 
     def test_validate_task_fail(self, task_state_dir, tmp_path):
         """Invalid result JSON writes exec_ file with passed=False and issues list, calls heal.py."""
@@ -265,32 +306,23 @@ class TestExecutionLedger:
         write_task(task_state_dir, task_id, task_type="article_published")
         # Missing required fields for ArticlePublishedOutput (url, word_count, title)
         result_json = json.dumps({"bad_field": "missing required fields"})
-        audit_log = tmp_path / "supervisor.jsonl"
-        exec_dir = tmp_path / "execution"
-        exec_dir.mkdir()
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = run_supervisor(
-                ["validate-task", "--task-id", task_id, "--result", result_json],
-                env={
-                    "ARIA_TASK_DIR": str(task_state_dir),
-                    "SUPERVISOR_AUDIT_LOG": str(audit_log),
-                    "SUPERVISOR_EXEC_DIR": str(exec_dir),
-                },
-            )
-
-        assert result.returncode == 1
+        exit_code, exec_dir, audit_log, mock_run = self._run_validate(
+            task_state_dir, tmp_path, task_id, result_json
+        )
+        assert exit_code == 1
         exec_file = exec_dir / f"exec_{task_id}.json"
         assert exec_file.exists()
         gate_result = json.loads(exec_file.read_text())
         assert gate_result["passed"] is False
         assert len(gate_result["issues"]) > 0
+        # subprocess.run called with heal.py attempt
+        assert mock_run.called
+        call_args = mock_run.call_args_list[0][0][0]
+        assert "attempt" in call_args
 
     def test_validate_task_unknown_type(self, task_state_dir, tmp_path):
         """Missing context.task_type falls back to TaskCompleteOutput schema."""
         task_id = "task_unknown_001"
-        # Task with no context.task_type
         task = {
             "id": task_id,
             "goal": "Some generic task",
@@ -302,24 +334,11 @@ class TestExecutionLedger:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         (task_state_dir / f"task_{task_id}.json").write_text(json.dumps(task))
-        # Valid TaskCompleteOutput
         result_json = json.dumps({"status": "success", "summary": "Done"})
-        audit_log = tmp_path / "supervisor.jsonl"
-        exec_dir = tmp_path / "execution"
-        exec_dir.mkdir()
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = run_supervisor(
-                ["validate-task", "--task-id", task_id, "--result", result_json],
-                env={
-                    "ARIA_TASK_DIR": str(task_state_dir),
-                    "SUPERVISOR_AUDIT_LOG": str(audit_log),
-                    "SUPERVISOR_EXEC_DIR": str(exec_dir),
-                },
-            )
-
-        assert result.returncode == 0
+        exit_code, exec_dir, audit_log, mock_run = self._run_validate(
+            task_state_dir, tmp_path, task_id, result_json
+        )
+        assert exit_code == 0
         exec_file = exec_dir / f"exec_{task_id}.json"
         assert exec_file.exists()
         gate_result = json.loads(exec_file.read_text())
@@ -340,28 +359,15 @@ class TestExecutionLedger:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
         (task_state_dir / f"task_{task_id}.json").write_text(json.dumps(task))
-        # Valid ArticlePublishedOutput
         result_json = json.dumps({
             "url": "https://example.com/article",
             "word_count": 1500,
             "title": "Python Testing Guide",
         })
-        audit_log = tmp_path / "supervisor.jsonl"
-        exec_dir = tmp_path / "execution"
-        exec_dir.mkdir()
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = run_supervisor(
-                ["validate-task", "--task-id", task_id, "--result", result_json],
-                env={
-                    "ARIA_TASK_DIR": str(task_state_dir),
-                    "SUPERVISOR_AUDIT_LOG": str(audit_log),
-                    "SUPERVISOR_EXEC_DIR": str(exec_dir),
-                },
-            )
-
-        assert result.returncode == 0
+        exit_code, exec_dir, audit_log, mock_run = self._run_validate(
+            task_state_dir, tmp_path, task_id, result_json
+        )
+        assert exit_code == 0
         exec_file = exec_dir / f"exec_{task_id}.json"
         gate_result = json.loads(exec_file.read_text())
         assert gate_result["passed"] is True
@@ -372,31 +378,17 @@ class TestExecutionLedger:
         task_id = "task_ledger_001"
         write_task(task_state_dir, task_id, task_type="task_complete")
         result_json = json.dumps({"status": "success", "summary": "All done"})
-        audit_log = tmp_path / "supervisor.jsonl"
-        exec_dir = tmp_path / "execution"
-        exec_dir.mkdir()
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            run_supervisor(
-                ["validate-task", "--task-id", task_id, "--result", result_json],
-                env={
-                    "ARIA_TASK_DIR": str(task_state_dir),
-                    "SUPERVISOR_AUDIT_LOG": str(audit_log),
-                    "SUPERVISOR_EXEC_DIR": str(exec_dir),
-                },
-            )
-
+        exit_code, exec_dir, audit_log, mock_run = self._run_validate(
+            task_state_dir, tmp_path, task_id, result_json
+        )
         exec_file = exec_dir / f"exec_{task_id}.json"
         assert exec_file.exists()
         data = json.loads(exec_file.read_text())
-        # Verify QualityGateResult fields
         assert "passed" in data
         assert "score" in data
         assert "issues" in data
         assert "task_type" in data
         assert "validated_at" in data
-        # validated_at should be a parseable ISO datetime
         datetime.fromisoformat(data["validated_at"])
 
     def test_quality_gate_status_updated(self, task_state_dir, tmp_path):
@@ -404,21 +396,9 @@ class TestExecutionLedger:
         task_id = "task_gate_001"
         task_path = write_task(task_state_dir, task_id, task_type="task_complete")
         result_json = json.dumps({"status": "success", "summary": "Completed"})
-        audit_log = tmp_path / "supervisor.jsonl"
-        exec_dir = tmp_path / "execution"
-        exec_dir.mkdir()
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            run_supervisor(
-                ["validate-task", "--task-id", task_id, "--result", result_json],
-                env={
-                    "ARIA_TASK_DIR": str(task_state_dir),
-                    "SUPERVISOR_AUDIT_LOG": str(audit_log),
-                    "SUPERVISOR_EXEC_DIR": str(exec_dir),
-                },
-            )
-
+        exit_code, exec_dir, audit_log, mock_run = self._run_validate(
+            task_state_dir, tmp_path, task_id, result_json
+        )
         task_data = json.loads(task_path.read_text())
         assert task_data["quality_gate_status"] in ("PASS", "FAIL")
         assert task_data["quality_gate_status"] == "PASS"
@@ -566,16 +546,28 @@ class TestAuditLog:
         exec_dir = tmp_path / "execution"
         exec_dir.mkdir()
 
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            run_supervisor(
-                ["validate-task", "--task-id", task_id, "--result", result_json],
-                env={
-                    "ARIA_TASK_DIR": str(task_state_dir),
-                    "SUPERVISOR_AUDIT_LOG": str(audit_log),
-                    "SUPERVISOR_EXEC_DIR": str(exec_dir),
-                },
-            )
+        # Use direct module call (in-process) so env var patches take effect
+        env_patch = {
+            "ARIA_TASK_DIR": str(task_state_dir),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        old_env = {}
+        for k, v in env_patch.items():
+            old_env[k] = os.environ.get(k)
+            os.environ[k] = v
+
+        try:
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0)
+                sup.validate_task(task_id, result_json)
+        finally:
+            for k, old_v in old_env.items():
+                if old_v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old_v
 
         lines = audit_log.read_text().strip().splitlines()
         records = [json.loads(l) for l in lines if l.strip()]
