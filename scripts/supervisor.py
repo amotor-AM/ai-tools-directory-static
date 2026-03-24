@@ -257,6 +257,104 @@ def assign_task(task_description: str, mission_id: str | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pre-execution hook: pre-check (SUPV-08)
+# ---------------------------------------------------------------------------
+
+def _load_blocklist() -> dict:
+    """Load blocklist.json for pre-execution pattern matching.
+
+    Re-reads SUPERVISOR_BLOCKLIST_PATH at call time so env var overrides work.
+    Fail-open: if file is missing or unreadable, returns empty patterns dict
+    and writes a warning to the audit log so the gap is visible.
+
+    Returns dict with keys: version (int), patterns (list of {pattern, reason, severity}).
+    """
+    blocklist_path = Path(os.environ.get("SUPERVISOR_BLOCKLIST_PATH", str(BLOCKLIST_PATH)))
+    if not blocklist_path.exists():
+        _audit("pre_check_warning", {
+            "warning": "blocklist.json not found — all actions allowed (fail-open)",
+            "path": str(blocklist_path),
+        })
+        return {"version": 0, "patterns": []}
+    try:
+        with open(blocklist_path) as f:
+            data = json.load(f)
+        # Ensure patterns key exists
+        if "patterns" not in data:
+            data["patterns"] = []
+        return data
+    except (json.JSONDecodeError, OSError) as e:
+        _audit("pre_check_warning", {
+            "warning": f"blocklist.json unreadable — all actions allowed (fail-open): {e}",
+            "path": str(blocklist_path),
+        })
+        return {"version": 0, "patterns": []}
+
+
+def pre_check(action_description: str, dry_run: bool = False) -> tuple:
+    """Check an action description against the blocklist before execution.
+
+    Pattern matching is case-insensitive regex. First matching pattern wins
+    (unless dry-run, which logs all matches without blocking).
+
+    Audit-logs every call — ALLOWED, BLOCKED, or DRY_RUN_MATCH.
+
+    Args:
+        action_description: Human-readable description of the action to check.
+        dry_run: If True, log pattern matches but never block (return True).
+
+    Returns:
+        (allowed: bool, reason: str)
+        allowed=True  → action may proceed
+        allowed=False → action is blocked; reason contains the human-readable block message
+    """
+    blocklist = _load_blocklist()
+    patterns = blocklist.get("patterns", [])
+    action_lower = action_description.lower()
+
+    matched_in_dry_run = []
+
+    for rule in patterns:
+        pattern = rule.get("pattern", "")
+        reason = rule.get("reason", "blocked")
+        severity = rule.get("severity", "unknown")
+
+        if not pattern:
+            continue
+
+        if re.search(pattern, action_lower):
+            if dry_run:
+                # Log each match but keep iterating
+                _audit("pre_check", {
+                    "action": action_description[:200],
+                    "result": "DRY_RUN_MATCH",
+                    "reason": reason,
+                    "severity": severity,
+                    "pattern": pattern,
+                })
+                matched_in_dry_run.append(pattern)
+            else:
+                # Real block — log and return immediately
+                _audit("pre_check", {
+                    "action": action_description[:200],
+                    "result": "BLOCKED",
+                    "reason": reason,
+                    "severity": severity,
+                    "pattern": pattern,
+                })
+                return (False, reason)
+
+    # No blocking match — allowed
+    _audit("pre_check", {
+        "action": action_description[:200],
+        "result": "ALLOWED",
+        "dry_run": dry_run,
+        "dry_run_matches": matched_in_dry_run if dry_run else [],
+    })
+    return (True, "")
+
+
+# ---------------------------------------------------------------------------
 # Outer loop: check-missions (SUPV-01)
 # ---------------------------------------------------------------------------
 
@@ -506,6 +604,19 @@ def main() -> None:
     vt_parser.add_argument("--task-id", required=True, help="Task ID to validate")
     vt_parser.add_argument("--result", required=True, help="Result JSON string")
 
+    # pre-check
+    pc_parser = subparsers.add_parser(
+        "pre-check",
+        help="Check action against blocklist before execution (pre-execution hook, SUPV-08)",
+    )
+    pc_parser.add_argument("--action", required=True, help="Action description to check")
+    pc_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="Show matching patterns without blocking (exit 0 always)",
+    )
+
     # audit-log
     al_parser = subparsers.add_parser("audit-log", help="Print last N audit records")
     al_parser.add_argument("--tail", type=int, default=20, help="Number of records to show (default: 20)")
@@ -522,6 +633,14 @@ def main() -> None:
     elif args.command == "validate-task":
         exit_code = validate_task(args.task_id, args.result)
         sys.exit(exit_code)
+    elif args.command == "pre-check":
+        allowed, reason = pre_check(args.action, dry_run=args.dry_run)
+        if allowed:
+            print(f"ALLOWED: {args.action}")
+            sys.exit(0)
+        else:
+            print(f"BLOCKED: {reason}")
+            sys.exit(1)
     elif args.command == "audit-log":
         audit_log_cmd(tail=args.tail)
     elif args.command == "assign-task":
