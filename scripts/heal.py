@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Aria self-healing coordinator — 4-tier recovery stack.
+"""Aria self-healing coordinator — 4-tier + skip recovery stack.
 
-This module handles the first two tiers of the recovery stack:
-
+Recovery tiers:
   Tier 1  — Transient failure: exponential backoff retry via tenacity.
   Tier 2  — Approach failure: switch to an alternative strategy.
-  Tier 3  — Capability / model fallback (added in Plan 03).
-  Tier 4  — Escalate to Claude Code (added in Plan 03).
+  Tier 3  — Capability / model fallback: walk Sonnet->Qwen3->GLM, then delegate.
+  Tier 4  — Escalate to Claude Code via task_manager.py escalate (no Telegram).
+  Tier 5  — Skip: cancel task and log failure (never contacts Alex).
 
 Exit codes (per research Pattern 1):
   0  — success / recovery dispatched
@@ -15,13 +15,14 @@ Exit codes (per research Pattern 1):
   3  — circuit breaker open, do not attempt
 
 Usage (CLI):
-  python3 heal.py attempt --task-id <id> [--tier 1|2] [--auto]
+  python3 heal.py attempt --task-id <id> [--tier 1|2|3|4|5] [--auto]
   python3 heal.py classify --error "rate limit exceeded"
   python3 heal.py status --task-id <id>
 """
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -35,6 +36,17 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 TM_PATH = "/home/alex/.openclaw/workspace/skills/aria-taskmanager/scripts/task_manager.py"
 OUTCOME_TRACKER = "/home/alex/.openclaw/workspace/scripts/outcome_tracker.py"
 MANAGE_PATH = "/home/alex/.openclaw/workspace/agents/manage.py"
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# ---------------------------------------------------------------------------
+# Circuit breaker imports (lazy path setup for portability)
+# ---------------------------------------------------------------------------
+
+# Add scripts/ to sys.path so circuit_breaker can be imported directly.
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from circuit_breaker import is_open, record_failure  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Error classification
@@ -259,6 +271,135 @@ def tier2_alternative(task_id: str, task: dict) -> int:
         )
         return 0
     except subprocess.CalledProcessError:
+        return 1
+
+
+# ---------------------------------------------------------------------------
+# Tier 3 — Model fallback chain + delegation
+# ---------------------------------------------------------------------------
+
+MODEL_FALLBACK_CHAIN: list[str] = [
+    "anthropic/claude-sonnet-4-5",
+    "qwen3:14b",
+    "huihui_ai/glm-4.7-flash-abliterated",
+]
+
+# Maps task goal keywords / task types to specialist agent names in manage.py registry
+_AGENT_KEYWORD_MAP: list[tuple[str, str]] = [
+    ("article", "content"),
+    ("seo", "seo"),
+    ("browser", "web"),
+    ("web", "web"),
+    ("scrape", "web"),
+    ("image", "image"),
+    ("video", "video"),
+    ("book", "content"),
+    ("publish", "publish"),
+    ("reddit", "social"),
+    ("social", "social"),
+    ("research", "research"),
+    ("code", "code"),
+]
+
+
+def _next_model(current: str, chain: list[str] = MODEL_FALLBACK_CHAIN) -> str | None:
+    """Return the next model in the fallback chain after current.
+
+    Returns None if current is the last model in the chain (or not found).
+    """
+    try:
+        idx = chain.index(current)
+    except ValueError:
+        # Unknown model — start from beginning so caller gets first fallback
+        return chain[0] if chain else None
+    if idx + 1 < len(chain):
+        return chain[idx + 1]
+    return None
+
+
+def _infer_agent(task: dict) -> str | None:
+    """Infer a specialist agent name from the task's goal or task_type.
+
+    Matches goal text against _AGENT_KEYWORD_MAP in order.
+    Returns None if no specialist match found.
+    """
+    goal = (task.get("goal") or "").lower()
+    task_type = (task.get("context", {}).get("task_type") or "").lower()
+    combined = f"{goal} {task_type}"
+    for keyword, agent in _AGENT_KEYWORD_MAP:
+        if keyword in combined:
+            return agent
+    return None
+
+
+def tier3_model_fallback(task_id: str, task: dict) -> int:
+    """Tier 3: walk the MODEL_FALLBACK_CHAIN then attempt delegation.
+
+    Step 1: Get the current model from task["context"].get("model").
+            Default = MODEL_FALLBACK_CHAIN[0] if not set.
+    Step 2: Get the next model via _next_model().
+    Step 3: If a next model exists, call task_manager.py retry with strategy
+            "model_fallback:{next_model}" and return 0.
+    Step 4: If no next model (chain exhausted), attempt delegation:
+            - Infer specialist agent via _infer_agent()
+            - If no agent found: return 1
+            - Check circuit breaker via is_open(agent, task_type)
+            - If open: return 3 (breaker-blocked)
+            - Call manage.py spawn agent --task <goal> [--mission-id <id>]
+            - On success: call task_manager.py delegate, return 0
+            - On failure: call record_failure(agent, task_type), return 1
+
+    Returns:
+        0  — model switched or delegation dispatched
+        1  — no suitable agent / delegation subprocess failed
+        3  — circuit breaker open
+    """
+    context = task.get("context") or {}
+    current_model = context.get("model", MODEL_FALLBACK_CHAIN[0])
+    task_type = context.get("task_type", "general")
+
+    next_model = _next_model(current_model)
+
+    if next_model is not None:
+        # Switch to next model in chain
+        strategy = f"model_fallback:{next_model}"
+        try:
+            subprocess.run(
+                ["python3", TM_PATH, "retry", task_id, "--strategy", strategy],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return 0
+        except subprocess.CalledProcessError:
+            return 1
+
+    # All models exhausted — try delegation
+    agent = _infer_agent(task)
+    if agent is None:
+        return 1
+
+    if is_open(agent, task_type):
+        return 3
+
+    # Spawn specialist agent
+    goal = task.get("goal", "")
+    spawn_cmd = ["python3", MANAGE_PATH, "spawn", agent, "--task", goal]
+    mission_id = context.get("mission_id")
+    if mission_id:
+        spawn_cmd += ["--mission-id", str(mission_id)]
+
+    try:
+        subprocess.run(spawn_cmd, check=True, capture_output=True, text=True)
+        # Mark task as delegated
+        subprocess.run(
+            ["python3", TM_PATH, "delegate", task_id, "--session-id", f"{agent}-delegated"],
+            capture_output=True,
+            text=True,
+        )
+        return 0
+    except subprocess.CalledProcessError:
+        record_failure(agent, task_type)
         return 1
 
 
