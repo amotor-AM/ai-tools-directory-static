@@ -134,6 +134,14 @@ class TaskClassification(BaseModel):
     reasoning: str
 
 
+class AdaptationOutput(BaseModel):
+    """Sonnet-generated strategy revision for a stalled mission."""
+    revised_strategy: str
+    new_subtasks: list[str]
+    cancel_task_ids: list[str] = Field(default_factory=list)
+    reasoning: str
+
+
 class AmbiguityCheck(BaseModel):
     """Assessment of whether a goal is too ambiguous to act on."""
     is_ambiguous: bool
@@ -964,6 +972,151 @@ def update_kpi(args):
 
 
 # ---------------------------------------------------------------------------
+# Mission adaptation (Plan 03 — stall recovery via Sonnet replanning)
+# ---------------------------------------------------------------------------
+
+def _check_reanchor(mission: dict) -> str:
+    """Build re-anchor language for the adapt prompt (anti-drift measure)."""
+    original_goal = mission.get("original_goal", mission.get("goal", ""))
+    return (
+        f"IMPORTANT: Re-anchor on the original goal: '{original_goal}'. "
+        "Do not drift toward proxy metrics. "
+        "All new subtasks must directly advance the original goal."
+    )
+
+
+def adapt_mission(args):
+    """Generate a revised task strategy via Sonnet when a mission is stalled.
+
+    Steps:
+    1. Load mission and build context (goal, strategy, completed/stalled tasks, KPIs).
+    2. Call Sonnet with re-anchor directive.
+    3. Cancel listed stalled tasks (annotate in mission tasks array).
+    4. Create new subtasks via task_manager.py classify + create flow.
+    5. Reset stall_count to 0, set status to ACTIVE, save.
+
+    Args:
+        --mission-id: Required. Mission ID to adapt.
+    """
+    mission, path = load_mission(args.mission_id)
+    client = Anthropic()
+
+    original_goal = mission.get("original_goal", mission.get("goal", ""))
+
+    # --- Build context snapshot ---
+    tasks = mission.get("tasks", [])
+    completed_tasks = []
+    stalled_tasks = []
+    for task_entry in tasks:
+        task_id = task_entry.get("task_id")
+        task_file = TASK_STATE_DIR / f"task_{task_id}.json" if task_id else None
+        status = "UNKNOWN"
+        if task_file and task_file.exists():
+            try:
+                with open(task_file) as f:
+                    td = json.load(f)
+                status = td.get("status", "UNKNOWN")
+            except (json.JSONDecodeError, OSError):
+                pass
+        if status in DONE_TASK_STATUSES:
+            completed_tasks.append(task_entry.get("goal", ""))
+        elif status not in IN_PROGRESS_STATUSES:
+            stalled_tasks.append(task_entry.get("goal", ""))
+
+    kpis = mission.get("kpis", [])
+    kpi_summary = "; ".join(
+        f"{k['metric']}={k.get('current', 0)}/{k.get('target', 'TBD')}"
+        for k in kpis
+    ) if kpis else "No KPIs tracked"
+
+    reanchor = _check_reanchor(mission)
+
+    prompt = (
+        f"This mission has stalled for {mission.get('stall_count', 3)} heartbeats with no progress.\n\n"
+        f"Original goal: {original_goal}\n"
+        f"Current strategy: {mission.get('strategy', 'None')}\n"
+        f"Completed tasks: {completed_tasks or ['None']}\n"
+        f"Stalled/pending tasks: {stalled_tasks or ['None']}\n"
+        f"Current KPI progress: {kpi_summary}\n\n"
+        f"{reanchor}\n\n"
+        "Generate a revised strategy with new subtasks to make progress. "
+        "For each stalled task that is no longer relevant, include its task_id in cancel_task_ids. "
+        "Return JSON matching the schema exactly."
+    )
+
+    result = client.beta.messages.parse(
+        model="claude-sonnet-4-5",
+        max_tokens=2048,
+        output_format=AdaptationOutput,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    adaptation = result.parsed
+
+    # --- Cancel stalled tasks listed by Sonnet ---
+    for cancel_id in adaptation.cancel_task_ids:
+        for task_entry in mission["tasks"]:
+            if task_entry.get("task_id") == cancel_id:
+                task_entry["status"] = "CANCELLED"
+
+    # --- Create new tasks from new_subtasks ---
+    new_task_entries = []
+    for subtask_str in adaptation.new_subtasks:
+        classification = classify_task(subtask_str)
+        enrichment = _enrich_subtask(subtask_str)
+
+        context_obj = {
+            "complexity": enrichment.complexity,
+            "mission_goal": original_goal,
+        }
+        cmd = [
+            sys.executable,
+            str(TM_PATH),
+            "create",
+            "--goal", subtask_str,
+            "--mission-id", args.mission_id,
+            "--source", "mission-subtask",
+            "--priority", str(mission.get("priority", 3)),
+            "--context", json.dumps(context_obj),
+        ]
+        if enrichment.requires_gpu:
+            cmd.append("--requires-gpu")
+
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+
+        task_id = None
+        if proc.returncode in (0, 2):
+            for line in proc.stdout.splitlines():
+                if line.startswith("CREATED:"):
+                    token = line.split(":", 1)[1].strip()
+                    task_id = token.split("_", 1)[1] if "_" in token else token
+                    break
+
+        new_task_entries.append({
+            "task_id": task_id or short_id(),
+            "goal": subtask_str,
+            "type": classification.task_type,
+            "cadence": classification.cadence,
+            "status": "CREATED",
+            "requires_gpu": enrichment.requires_gpu,
+        })
+
+    # --- Update mission ---
+    mission["tasks"] = mission["tasks"] + new_task_entries
+    mission["strategy"] = adaptation.revised_strategy
+    mission["stall_count"] = 0
+    mission["status"] = "ACTIVE"
+    mission["updated_at"] = now_iso()
+
+    save_mission(mission, path)
+    update_ledger(args.mission_id, mission["goal"], "ACTIVE", mission.get("priority", 3))
+
+    print(f"MISSION_ADAPTED: mission_{args.mission_id}")
+    print(f"  New tasks: {len(new_task_entries)}")
+    print(f"  Cancelled: {len(adaptation.cancel_task_ids)}")
+    print(f"  Strategy: {adaptation.revised_strategy[:80]}")
+
+
+# ---------------------------------------------------------------------------
 # Argparse setup
 # ---------------------------------------------------------------------------
 
@@ -1007,9 +1160,9 @@ def main():
     p_kpi.add_argument("--check-stall", action="store_true",
                        help="Run stall detection based on task progress")
 
-    # --- adapt (Plan 04) ---
-    p_adapt = sub.add_parser("adapt", help="[Plan 04] Adapt mission strategy when stalled")
-    p_adapt.add_argument("--mission-id", required=True)
+    # --- adapt ---
+    p_adapt = sub.add_parser("adapt", help="Adapt mission strategy when stalled (calls Sonnet)")
+    p_adapt.add_argument("--mission-id", required=True, help="Mission ID to adapt")
 
     # --- next-task ---
     p_next = sub.add_parser("next-task", help="Get next eligible task for a mission (dependency order)")
@@ -1034,7 +1187,7 @@ def main():
         "decompose": decompose_mission,
         "classify": classify_subcommand,
         "update-kpi": update_kpi,
-        "adapt": _not_implemented,
+        "adapt": adapt_mission,
         "next-task": next_task,
     }
     commands[args.command](args)

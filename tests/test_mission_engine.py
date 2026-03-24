@@ -1745,6 +1745,18 @@ def _make_mock_adaptation(revised_strategy="New strategy", new_subtasks=None, ca
     return mock_result
 
 
+def _adapt_ollama_side_effect(subtask_count=2):
+    """Build ollama.chat side_effect list for adapt_mission.
+
+    adapt calls classify_task + _enrich_subtask per subtask (2 chat calls each).
+    """
+    responses = []
+    for _ in range(subtask_count):
+        responses.append(_make_mock_classification("one-time", 0.9))
+        responses.append(_make_mock_enrichment(2, False))
+    return responses
+
+
 class TestAdapt:
     def test_adapt_updates_strategy_field(self, mission_dir, task_state_dir):
         """adapt sets mission strategy to revised_strategy from Sonnet."""
@@ -1769,7 +1781,7 @@ class TestAdapt:
         with patch("mission_engine.Anthropic", return_value=mock_client), \
              patch("mission_engine.ollama") as mock_ollama, \
              patch("mission_engine.subprocess") as mock_sub:
-            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_ollama.chat.side_effect = _adapt_ollama_side_effect(2)
             mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada001\n")
 
             args = MagicMock()
@@ -1803,7 +1815,7 @@ class TestAdapt:
         with patch("mission_engine.Anthropic", return_value=mock_client), \
              patch("mission_engine.ollama") as mock_ollama, \
              patch("mission_engine.subprocess") as mock_sub:
-            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_ollama.chat.side_effect = _adapt_ollama_side_effect(2)
             mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada002\n")
 
             args = MagicMock()
@@ -1836,7 +1848,7 @@ class TestAdapt:
         with patch("mission_engine.Anthropic", return_value=mock_client), \
              patch("mission_engine.ollama") as mock_ollama, \
              patch("mission_engine.subprocess") as mock_sub:
-            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_ollama.chat.side_effect = _adapt_ollama_side_effect(2)
             mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada003\n")
 
             args = MagicMock()
@@ -1871,7 +1883,7 @@ class TestAdapt:
         with patch("mission_engine.Anthropic", return_value=mock_client), \
              patch("mission_engine.ollama") as mock_ollama, \
              patch("mission_engine.subprocess") as mock_sub:
-            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_ollama.chat.side_effect = _adapt_ollama_side_effect(2)
             mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada004\n")
 
             args = MagicMock()
@@ -1906,7 +1918,7 @@ class TestAdapt:
         with patch("mission_engine.Anthropic", return_value=mock_client), \
              patch("mission_engine.ollama") as mock_ollama, \
              patch("mission_engine.subprocess") as mock_sub:
-            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_ollama.chat.side_effect = _adapt_ollama_side_effect(2)
             mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada005\n")
 
             args = MagicMock()
@@ -1940,7 +1952,7 @@ class TestAdapt:
         with patch("mission_engine.Anthropic", return_value=mock_client), \
              patch("mission_engine.ollama") as mock_ollama, \
              patch("mission_engine.subprocess") as mock_sub:
-            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_ollama.chat.side_effect = _adapt_ollama_side_effect(2)
             mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada006\n")
 
             args = MagicMock()
@@ -1984,7 +1996,7 @@ class TestAdaptReanchor:
         with patch("mission_engine.Anthropic", return_value=mock_client), \
              patch("mission_engine.ollama") as mock_ollama, \
              patch("mission_engine.subprocess") as mock_sub:
-            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_ollama.chat.side_effect = _adapt_ollama_side_effect(2)
             mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_anc001\n")
 
             args = MagicMock()
@@ -2033,7 +2045,7 @@ class TestAdaptReanchor:
         with patch("mission_engine.Anthropic", return_value=mock_client), \
              patch("mission_engine.ollama") as mock_ollama, \
              patch("mission_engine.subprocess") as mock_sub:
-            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_ollama.chat.side_effect = _adapt_ollama_side_effect(2)
             mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_anc002\n")
 
             args = MagicMock()
