@@ -211,6 +211,46 @@ def _do_retry_subprocess(task_id: str, strategy: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Outcome recording helper  (HEAL-07) — defined early so all tiers can call it
+# ---------------------------------------------------------------------------
+
+
+def _record_outcome(task: dict, tier: int, action: str, success: bool) -> None:
+    """Record a recovery attempt to outcome_tracker.py (HEAL-07).
+
+    approach format: heal_tier{N}_{action}
+    task_type inferred from context.task_type or goal keywords.
+    """
+    task_type = (task.get("context") or {}).get("task_type", "unknown")
+    if task_type == "unknown":
+        goal = (task.get("goal") or "").lower()
+        if "article" in goal:
+            task_type = "article"
+        elif "video" in goal:
+            task_type = "video"
+        elif "book" in goal:
+            task_type = "book"
+        else:
+            task_type = "general"
+
+    approach = f"heal_tier{tier}_{action}"
+    outcome = "success" if success else "failure"
+    last_error = (task.get("last_error") or "")[:80]
+    task_id = task.get("id", "?")
+
+    subprocess.run(
+        [
+            "python3", OUTCOME_TRACKER, "record",
+            "--task-type", task_type,
+            "--outcome", outcome,
+            "--approach", approach,
+            "--notes", f"Task {task_id}: {last_error}",
+        ],
+        capture_output=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tier 1 — Exponential backoff retry
 # ---------------------------------------------------------------------------
 
@@ -224,6 +264,8 @@ def tier1_retry(task_id: str, task: dict) -> int:
 
     Otherwise, calls _do_retry_subprocess() which uses tenacity @retry with
     stop_after_attempt(3) and wait_exponential(multiplier=2, min=4, max=60).
+
+    Records outcome to outcome_tracker.py (HEAL-07).
 
     Returns:
         0  — retry dispatched successfully
@@ -239,8 +281,10 @@ def tier1_retry(task_id: str, task: dict) -> int:
 
     try:
         _do_retry_subprocess(task_id, strategy)
+        _record_outcome(task, 1, "backoff", True)
         return 0
     except Exception:
+        _record_outcome(task, 1, "backoff", False)
         return 1
 
 
@@ -253,7 +297,7 @@ def tier2_alternative(task_id: str, task: dict) -> int:
     """Tier 2: switch to a concrete alternative strategy.
 
     Gets the alternative from get_alternative() and calls task_manager.py retry
-    with that strategy.
+    with that strategy. Records outcome to outcome_tracker.py (HEAL-07).
 
     Returns:
         0  — alternative dispatched
@@ -269,8 +313,10 @@ def tier2_alternative(task_id: str, task: dict) -> int:
             capture_output=True,
             text=True,
         )
+        _record_outcome(task, 2, "alternative_approach", True)
         return 0
     except subprocess.CalledProcessError:
+        _record_outcome(task, 2, "alternative_approach", False)
         return 1
 
 
@@ -363,6 +409,8 @@ def tier3_model_fallback(task_id: str, task: dict) -> int:
     if next_model is not None:
         # Switch to next model in chain
         strategy = f"model_fallback:{next_model}"
+        # Use short model name for approach string (last segment after /)
+        short_model = next_model.split("/")[-1].split(":")[0]
         try:
             subprocess.run(
                 ["python3", TM_PATH, "retry", task_id, "--strategy", strategy],
@@ -370,16 +418,20 @@ def tier3_model_fallback(task_id: str, task: dict) -> int:
                 capture_output=True,
                 text=True,
             )
+            _record_outcome(task, 3, f"model_fallback:{short_model}", True)
             return 0
         except subprocess.CalledProcessError:
+            _record_outcome(task, 3, f"model_fallback:{short_model}", False)
             return 1
 
     # All models exhausted — try delegation
     agent = _infer_agent(task)
     if agent is None:
+        _record_outcome(task, 3, "delegation:no_agent", False)
         return 1
 
     if is_open(agent, task_type):
+        _record_outcome(task, 3, f"delegation:{agent}:breaker_open", False)
         return 3
 
     # Spawn specialist agent
@@ -397,10 +449,131 @@ def tier3_model_fallback(task_id: str, task: dict) -> int:
             capture_output=True,
             text=True,
         )
+        _record_outcome(task, 3, f"delegation:{agent}", True)
         return 0
     except subprocess.CalledProcessError:
         record_failure(agent, task_type)
+        _record_outcome(task, 3, f"delegation:{agent}", False)
         return 1
+
+
+# ---------------------------------------------------------------------------
+# Tier 4 — Escalation (generates Claude Code handoff brief)
+# ---------------------------------------------------------------------------
+
+
+def tier4_escalate(task_id: str, task: dict) -> int:
+    """Tier 4: escalate to Claude Code by calling task_manager.py escalate.
+
+    Generates a structured handoff brief for the next human/agent to resolve.
+    Does NOT send any Telegram message — escalation is file-based only.
+    Records outcome approach "heal_tier4_escalated" to outcome_tracker.py.
+
+    Returns:
+        0  — escalation dispatched successfully
+        1  — subprocess failed
+    """
+    _TIER4_ACTION = "heal_tier4_escalated"  # approach string for outcome recording
+    try:
+        subprocess.run(
+            ["python3", TM_PATH, "escalate", task_id],
+            capture_output=True,
+            text=True,
+        )
+        _record_outcome(task, 4, "escalated", True)
+        return 0
+    except Exception:
+        _record_outcome(task, 4, "escalated", False)
+        return 1
+
+
+# ---------------------------------------------------------------------------
+# Tier 5 — Skip + log  (never contacts Alex)
+# ---------------------------------------------------------------------------
+
+
+def tier5_skip(task_id: str, task: dict) -> int:
+    """Tier 5: cancel the task and log failure — all recovery tiers exhausted.
+
+    Calls task_manager.py cancel with reason "all recovery tiers exhausted".
+    Records outcome as failure with approach "heal_tier5_skipped".
+    NEVER contacts Alex or sends Telegram messages.
+
+    Returns:
+        2  — all tiers exhausted (canonical exit code for exhaustion)
+    """
+    _TIER5_ACTION = "heal_tier5_skipped"  # approach string for outcome recording
+    subprocess.run(
+        [
+            "python3", TM_PATH, "cancel", task_id,
+            "--reason", "all recovery tiers exhausted",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    _record_outcome(task, 5, "skipped", False)
+    return 2
+
+
+# ---------------------------------------------------------------------------
+# Dispatch helper + auto attempt
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_tier(tier: int, task_id: str, task: dict) -> int:
+    """Dispatch recovery to the specified tier function.
+
+    Returns the tier function's exit code.
+    """
+    if tier == 1:
+        return tier1_retry(task_id, task)
+    elif tier == 2:
+        return tier2_alternative(task_id, task)
+    elif tier == 3:
+        return tier3_model_fallback(task_id, task)
+    elif tier == 4:
+        return tier4_escalate(task_id, task)
+    elif tier == 5:
+        return tier5_skip(task_id, task)
+    else:
+        return 1
+
+
+def attempt(task_id: str, tier: int | None = None) -> int:
+    """Attempt recovery for the given task.
+
+    If tier is specified, run that tier directly.
+    If tier is None (auto mode), walk the tier ladder starting from select_tier():
+      - Run each tier in order
+      - If tier returns 1 (failed, try next): RELOAD task state via _load_task(task_id)
+        before invoking the next tier. This is CRITICAL because tier N modifies task
+        state (retry_strategy, consecutive_step_errors, error_history) via task_manager.py
+        and the next tier must see the updated state.
+      - Stop if result != 1 (0=success, 2=exhausted, 3=breaker-open)
+
+    Returns:
+        0  — recovery dispatched successfully
+        1  — failed (specific tier requested and failed)
+        2  — all tiers exhausted
+        3  — circuit breaker open
+    """
+    task = _load_task(task_id)
+    if not task:
+        return 1
+
+    if tier is not None:
+        return _dispatch_tier(tier, task_id, task)
+
+    # Auto mode: walk tiers with state reload between each escalation
+    selected = select_tier(task)
+    for t in range(selected, 6):  # tiers 1-5
+        result = _dispatch_tier(t, task_id, task)
+        if result != 1:  # 0=success, 2=exhausted, 3=breaker-open
+            return result
+        # RELOAD task state before next tier — tier t modified it via task_manager.py
+        task = _load_task(task_id)
+
+    return 2  # all tiers exhausted
 
 
 # ---------------------------------------------------------------------------
@@ -409,33 +582,12 @@ def tier3_model_fallback(task_id: str, task: dict) -> int:
 
 
 def _cmd_attempt(args) -> int:
-    task = _load_task(args.task_id)
-    if not task:
-        print(f"ERROR: Could not load task {args.task_id}", file=sys.stderr)
-        return 1
-
     if args.auto:
-        tier = select_tier(task)
+        return attempt(args.task_id, tier=None)
     elif args.tier:
-        tier = args.tier
+        return attempt(args.task_id, tier=args.tier)
     else:
-        tier = select_tier(task)
-
-    print(f"Dispatching tier {tier} recovery for task {args.task_id}")
-
-    if tier == 1:
-        return tier1_retry(args.task_id, task)
-    elif tier == 2:
-        return tier2_alternative(args.task_id, task)
-    elif tier == 3:
-        print("Tier 3 (model fallback) not implemented yet — planned for Plan 03")
-        return 1
-    elif tier == 4:
-        print("Tier 4 (Claude Code escalation) not implemented yet — planned for Plan 03")
-        return 1
-    else:
-        print(f"Unknown tier: {tier}", file=sys.stderr)
-        return 1
+        return attempt(args.task_id, tier=None)
 
 
 def _cmd_classify(args) -> int:
@@ -473,8 +625,8 @@ def main() -> None:
     p_attempt = sub.add_parser("attempt", help="Attempt recovery for a task")
     p_attempt.add_argument("--task-id", required=True, help="Task ID (e.g. abc123)")
     tier_group = p_attempt.add_mutually_exclusive_group()
-    tier_group.add_argument("--tier", type=int, choices=[1, 2, 3, 4],
-                            help="Force a specific tier (1-4)")
+    tier_group.add_argument("--tier", type=int, choices=[1, 2, 3, 4, 5],
+                            help="Force a specific tier (1-5)")
     tier_group.add_argument("--auto", action="store_true",
                             help="Auto-select tier from task state")
 
