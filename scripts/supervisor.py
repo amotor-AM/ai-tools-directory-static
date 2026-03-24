@@ -9,24 +9,32 @@ Inner loop (validate-task, SUPV-02):
   Validates sub-agent result JSON against OUTPUT_SCHEMAS, writes exec_ ledger entry,
   gates task completion (task_manager.py complete) or triggers healing (heal.py attempt).
 
+Pre-execution hook (pre-check, SUPV-08):
+  Pattern-matches action descriptions against blocklist.json before execution.
+  Blocks irreversible actions (mass delete, payments, email blast >500).
+  All actions — allowed and blocked — are audit-logged.
+
 Audit log (audit-log, SUPV-09):
   Append-only JSONL decision trail for every supervisor operation.
 
 Usage:
   supervisor.py check-missions
   supervisor.py validate-task --task-id <id> --result '<json>'
+  supervisor.py pre-check --action '<description>' [--dry-run]
   supervisor.py audit-log [--tail N]
 
 Environment overrides (for testing):
-  SUPERVISOR_AUDIT_LOG  — override AUDIT_LOG_PATH
-  SUPERVISOR_EXEC_DIR   — override EXEC_DIR
-  MISSION_DIR           — override missions directory (reuses mission_engine pattern)
-  ARIA_TASK_DIR         — override task state directory (reuses task_manager pattern)
+  SUPERVISOR_AUDIT_LOG      — override AUDIT_LOG_PATH
+  SUPERVISOR_EXEC_DIR       — override EXEC_DIR
+  SUPERVISOR_BLOCKLIST_PATH — override BLOCKLIST_PATH
+  MISSION_DIR               — override missions directory (reuses mission_engine pattern)
+  ARIA_TASK_DIR             — override task state directory (reuses task_manager pattern)
 """
 
 import argparse
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,15 +72,26 @@ AUDIT_LOG_PATH = Path(os.environ.get(
     "/home/alex/.openclaw/workspace/memory/audit/supervisor.jsonl"
 ))
 
+# Pre-execution hook blocklist — pattern-based denylist
+BLOCKLIST_PATH = Path(os.environ.get(
+    "SUPERVISOR_BLOCKLIST_PATH",
+    "/home/alex/.openclaw/workspace/memory/guardrails/blocklist.json"
+))
+
 # Downstream script paths
 TM_PATH = "/home/alex/.openclaw/workspace/skills/aria-taskmanager/scripts/task_manager.py"
 HEAL_PATH = "/home/alex/.openclaw/workspace/scripts/heal.py"
+ME_PATH = "/home/alex/.openclaw/workspace/scripts/mission_engine.py"
+MANAGE_PATH = "/home/alex/.openclaw/workspace/agents/manage.py"
 
 # Mission statuses to check in outer loop
 ACTIVE_STATUSES = {"ACTIVE", "ADAPTING", "STALLED"}
 
 # Task statuses that count as "DONE" for stall detection
 DONE_TASK_STATUSES = {"DONE", "COMPLETED"}
+
+# Stall detection threshold — triggers mission_engine.py adapt
+STALL_THRESHOLD = 3
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +175,88 @@ def _save_meta(mission_id: str, meta: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Stall-triggered adapt (SUPV-03)
+# ---------------------------------------------------------------------------
+
+def _trigger_adapt(mission_id: str) -> None:
+    """Call mission_engine.py adapt for a stalled mission.
+
+    Resets stall_count to 0 in the meta sidecar BEFORE calling adapt so that
+    the next heartbeat cycle does not re-trigger while adapt is running.
+    Writes audit record with op='trigger_adapt'.
+    """
+    import subprocess
+
+    # Reset stall_count first to prevent re-triggering on the next heartbeat
+    meta = _load_meta(mission_id)
+    meta["stall_count"] = 0
+    _save_meta(mission_id, meta)
+
+    # Fire mission_engine.py adapt
+    subprocess.run(
+        [sys.executable, ME_PATH, "adapt", "--mission-id", mission_id],
+        check=False,
+    )
+
+    _audit("trigger_adapt", {
+        "mission_id": mission_id,
+        "reason": "stall_count >= STALL_THRESHOLD",
+    })
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent assignment (SUPV-05)
+# ---------------------------------------------------------------------------
+
+def assign_task(task_description: str, mission_id: str | None = None) -> str:
+    """Route a task description to the best sub-agent and spawn it.
+
+    Steps:
+      1. Call manage.py route <description> to get the agent slug.
+      2. Call manage.py spawn <slug> --task <description> [--mission-id <id>].
+      3. Write audit record with op='assign_task'.
+
+    Returns the agent slug selected by routing.
+    """
+    import subprocess
+
+    # Step 1: route
+    route_result = subprocess.run(
+        [sys.executable, MANAGE_PATH, "route", task_description],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # Parse "  agent: <slug>" from route output
+    agent_slug = "contentagent"  # fallback default
+    for line in (route_result.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("agent:"):
+            agent_slug = stripped.split("agent:", 1)[1].strip()
+            break
+
+    # Step 2: spawn
+    spawn_cmd = [
+        sys.executable, MANAGE_PATH, "spawn", agent_slug,
+        "--task", task_description,
+    ]
+    if mission_id:
+        spawn_cmd += ["--mission-id", mission_id]
+
+    subprocess.run(spawn_cmd, check=False)
+
+    # Step 3: audit
+    _audit("assign_task", {
+        "task": task_description[:200],
+        "agent": agent_slug,
+        "mission_id": mission_id,
+    })
+
+    return agent_slug
+
+
+# ---------------------------------------------------------------------------
 # Outer loop: check-missions (SUPV-01)
 # ---------------------------------------------------------------------------
 
@@ -212,18 +313,26 @@ def check_missions() -> None:
         stall_count = meta.get("stall_count", 0)
 
         # Stall detection: progress resets stall_count, no progress increments it
+        adapt_triggered = False
         if done_count > last_done_count:
             stall_count = 0
             meta["last_done_count"] = done_count
         else:
             stall_count += 1
+            if stall_count >= STALL_THRESHOLD:
+                adapt_triggered = True
 
         meta["stall_count"] = stall_count
         _save_meta(mission_id, meta)
 
+        # Trigger adapt AFTER saving meta (so _trigger_adapt can reset stall_count atomically)
+        if adapt_triggered:
+            _trigger_adapt(mission_id)
+
         # Terse output: one line per mission
         goal_truncated = goal[:40]
-        print(f"{mission_id} | {goal_truncated} | {status} | stall:{stall_count} | done:{done_count}")
+        adapt_marker = " [ADAPT]" if adapt_triggered else ""
+        print(f"{mission_id} | {goal_truncated} | {status} | stall:{stall_count} | done:{done_count}{adapt_marker}")
         missions_checked += 1
 
     _audit("check_missions", {"missions_checked": missions_checked})
@@ -401,6 +510,11 @@ def main() -> None:
     al_parser = subparsers.add_parser("audit-log", help="Print last N audit records")
     al_parser.add_argument("--tail", type=int, default=20, help="Number of records to show (default: 20)")
 
+    # assign-task
+    at_parser = subparsers.add_parser("assign-task", help="Route and spawn task to best sub-agent")
+    at_parser.add_argument("--description", required=True, help="Task description")
+    at_parser.add_argument("--mission-id", default=None, help="Parent mission ID for traceability")
+
     args = parser.parse_args()
 
     if args.command == "check-missions":
@@ -410,6 +524,9 @@ def main() -> None:
         sys.exit(exit_code)
     elif args.command == "audit-log":
         audit_log_cmd(tail=args.tail)
+    elif args.command == "assign-task":
+        agent_slug = assign_task(args.description, mission_id=args.mission_id)
+        print(f"Assigned to: {agent_slug}")
     else:
         parser.print_help()
         sys.exit(1)

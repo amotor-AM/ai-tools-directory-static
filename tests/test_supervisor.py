@@ -1,13 +1,22 @@
-"""TDD test suite for supervisor.py — Phase 4 Plan 01.
+"""TDD test suite for supervisor.py — Phase 4 Plans 01 and 02.
 
 Covers:
   SUPV-01: Mission Ledger (outer loop) — check-missions
   SUPV-02: Execution Ledger (inner loop) — validate-task
+  SUPV-03: Stall-triggered adapt — _trigger_adapt, check-missions stall logic
+  SUPV-05: Sub-agent assignment — assign_task via manage.py route + spawn
+  SUPV-06: Outer-loop replan — [ADAPT] marker, stall reset after adapt
+  SUPV-08: Pre-execution hooks — pre-check
   SUPV-09: Audit log — _audit(), audit-log subcommand
 
 Requirement coverage:
   TestMissionLedger   → SUPV-01
   TestExecutionLedger → SUPV-02
+  TestStallReplan     → SUPV-03
+  TestAgentAssignment → SUPV-05
+  TestOuterLoopReplan → SUPV-06
+  TestPreExecHooks    → SUPV-08
+  TestManageMissionId → (manage.py backward compat)
   TestAuditLog        → SUPV-09
 
 Testing strategy:
@@ -573,3 +582,619 @@ class TestAuditLog:
         records = [json.loads(l) for l in lines if l.strip()]
         ops = [r["op"] for r in records]
         assert "validate_task" in ops, f"Expected 'validate_task' op in audit, got: {ops}"
+
+
+# ---------------------------------------------------------------------------
+# TestStallReplan — SUPV-03
+#
+# Uses direct module import so subprocess.run can be mocked in-process to
+# capture calls to mission_engine.py adapt without actually running it.
+# ---------------------------------------------------------------------------
+
+def _env_context(env_patch: dict):
+    """Context manager: temporarily set env vars, restore on exit."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        old = {}
+        for k, v in env_patch.items():
+            old[k] = os.environ.get(k)
+            os.environ[k] = v
+        try:
+            yield
+        finally:
+            for k, old_v in old.items():
+                if old_v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old_v
+
+    return _ctx()
+
+
+class TestStallReplan:
+    """Tests for stall-triggered adapt in supervisor.py (SUPV-03)."""
+
+    def _setup_mission(self, mission_dir, task_state_dir, mission_id, stall_count,
+                       last_done_count, done_task_count=None):
+        """Create ledger + meta sidecar + tasks for a given mission state."""
+        write_ledger(mission_dir, [
+            {"id": mission_id, "goal": "Grow audience", "status": "ACTIVE", "priority": 2}
+        ])
+        meta_dir = mission_dir / "meta"
+        meta_dir.mkdir(exist_ok=True)
+        meta_path = meta_dir / f"mission_{mission_id}_meta.json"
+        meta_path.write_text(json.dumps({
+            "last_done_count": last_done_count,
+            "stall_count": stall_count,
+        }))
+        if done_task_count is not None:
+            for i in range(done_task_count):
+                write_task(task_state_dir, f"task_{mission_id}_{i}", mission_id=mission_id, status="DONE")
+        return meta_path
+
+    def test_stall_triggers_adapt(self, mission_dir, task_state_dir, tmp_path):
+        """stall_count=2 + no progress → stall_count=3 >= STALL_THRESHOLD → adapt called."""
+        mission_id = "m_stall_adapt_001"
+        meta_path = self._setup_mission(
+            mission_dir, task_state_dir, mission_id,
+            stall_count=2, last_done_count=1, done_task_count=1  # no new done tasks
+        )
+        audit_log = tmp_path / "supervisor.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "MISSION_DIR": str(mission_dir),
+            "ARIA_TASK_DIR": str(task_state_dir),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0)
+                sup.check_missions()
+        # subprocess.run should have been called with mission_engine.py adapt
+        calls = mock_run.call_args_list
+        adapt_calls = [c for c in calls if "adapt" in str(c)]
+        assert len(adapt_calls) >= 1, f"Expected adapt call, got: {calls}"
+        adapt_cmd = adapt_calls[0][0][0]
+        assert "adapt" in adapt_cmd
+        assert "--mission-id" in adapt_cmd
+        assert mission_id in adapt_cmd
+
+    def test_stall_below_threshold_no_adapt(self, mission_dir, task_state_dir, tmp_path):
+        """stall_count=1 + no progress → stall_count=2 < STALL_THRESHOLD(3) → adapt NOT called."""
+        mission_id = "m_stall_below_001"
+        self._setup_mission(
+            mission_dir, task_state_dir, mission_id,
+            stall_count=1, last_done_count=1, done_task_count=1  # no new done tasks
+        )
+        audit_log = tmp_path / "supervisor.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "MISSION_DIR": str(mission_dir),
+            "ARIA_TASK_DIR": str(task_state_dir),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0)
+                sup.check_missions()
+        adapt_calls = [c for c in mock_run.call_args_list if "adapt" in str(c)]
+        assert len(adapt_calls) == 0, f"Expected no adapt call at stall_count=2, got: {adapt_calls}"
+
+    def test_progress_resets_stall(self, mission_dir, task_state_dir, tmp_path):
+        """stall_count=2 + new DONE tasks found → stall_count reset to 0, adapt NOT called."""
+        mission_id = "m_progress_reset_001"
+        meta_path = self._setup_mission(
+            mission_dir, task_state_dir, mission_id,
+            stall_count=2, last_done_count=1, done_task_count=3  # 3 > 1, so progress
+        )
+        audit_log = tmp_path / "supervisor.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "MISSION_DIR": str(mission_dir),
+            "ARIA_TASK_DIR": str(task_state_dir),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0)
+                sup.check_missions()
+        # stall_count should be 0 in meta
+        meta = json.loads(meta_path.read_text())
+        assert meta["stall_count"] == 0, f"Expected stall_count=0 after progress, got {meta['stall_count']}"
+        # adapt should NOT be called
+        adapt_calls = [c for c in mock_run.call_args_list if "adapt" in str(c)]
+        assert len(adapt_calls) == 0, f"Expected no adapt call on progress, got: {adapt_calls}"
+
+    def test_adapt_audit_record(self, mission_dir, task_state_dir, tmp_path):
+        """When adapt is triggered, audit record with op='trigger_adapt' is written."""
+        mission_id = "m_adapt_audit_001"
+        self._setup_mission(
+            mission_dir, task_state_dir, mission_id,
+            stall_count=2, last_done_count=1, done_task_count=1  # triggers adapt
+        )
+        audit_log = tmp_path / "supervisor.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "MISSION_DIR": str(mission_dir),
+            "ARIA_TASK_DIR": str(task_state_dir),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0)
+                sup.check_missions()
+        # Audit should contain trigger_adapt record
+        lines = audit_log.read_text().strip().splitlines()
+        records = [json.loads(l) for l in lines if l.strip()]
+        ops = [r["op"] for r in records]
+        assert "trigger_adapt" in ops, f"Expected 'trigger_adapt' in audit ops, got: {ops}"
+
+
+# ---------------------------------------------------------------------------
+# TestOuterLoopReplan — SUPV-06
+# ---------------------------------------------------------------------------
+
+class TestOuterLoopReplan:
+    """Tests for outer-loop replan markers and stall reset after adapt (SUPV-06)."""
+
+    def test_outer_loop_flags_stalled_mission(self, mission_dir, task_state_dir, tmp_path):
+        """check-missions output includes '[ADAPT]' for missions at stall threshold."""
+        mission_id = "m_adapt_flag_001"
+        write_ledger(mission_dir, [
+            {"id": mission_id, "goal": "Build email list", "status": "ACTIVE", "priority": 2}
+        ])
+        meta_dir = mission_dir / "meta"
+        meta_dir.mkdir()
+        (meta_dir / f"mission_{mission_id}_meta.json").write_text(
+            json.dumps({"last_done_count": 2, "stall_count": 2})
+        )
+        # 2 done tasks, same as last_done_count → no progress → stall_count becomes 3
+        write_task(task_state_dir, "task_flag_a", mission_id=mission_id, status="DONE")
+        write_task(task_state_dir, "task_flag_b", mission_id=mission_id, status="DONE")
+
+        audit_log = tmp_path / "supervisor.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        # Run via subprocess so we can capture stdout (check-missions is sync/file-based)
+        result = run_supervisor(
+            ["check-missions"],
+            env={
+                "MISSION_DIR": str(mission_dir),
+                "ARIA_TASK_DIR": str(task_state_dir),
+                "SUPERVISOR_AUDIT_LOG": str(audit_log),
+                "SUPERVISOR_EXEC_DIR": str(exec_dir),
+            },
+        )
+        assert result.returncode == 0
+        assert "[ADAPT]" in result.stdout, f"Expected '[ADAPT]' in output: {result.stdout!r}"
+
+    def test_stall_resets_after_adapt(self, mission_dir, task_state_dir, tmp_path):
+        """After _trigger_adapt fires, stall_count in meta sidecar is reset to 0."""
+        mission_id = "m_stall_reset_001"
+        write_ledger(mission_dir, [
+            {"id": mission_id, "goal": "Publish 10 articles", "status": "ACTIVE", "priority": 2}
+        ])
+        meta_dir = mission_dir / "meta"
+        meta_dir.mkdir()
+        meta_path = meta_dir / f"mission_{mission_id}_meta.json"
+        meta_path.write_text(json.dumps({"last_done_count": 1, "stall_count": 2}))
+        write_task(task_state_dir, "task_reset_a", mission_id=mission_id, status="DONE")
+        # 1 done task, same as last_done_count → no progress → stall_count becomes 3 → adapt fires
+
+        audit_log = tmp_path / "supervisor.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "MISSION_DIR": str(mission_dir),
+            "ARIA_TASK_DIR": str(task_state_dir),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0)
+                sup.check_missions()
+        # After adapt, stall_count should be reset to 0
+        meta = json.loads(meta_path.read_text())
+        assert meta["stall_count"] == 0, (
+            f"Expected stall_count=0 after adapt reset, got {meta['stall_count']}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestAgentAssignment — SUPV-05
+# ---------------------------------------------------------------------------
+
+MANAGE_PATH = "/home/alex/.openclaw/workspace/agents/manage.py"
+
+
+class TestAgentAssignment:
+    """Tests for assign_task() in supervisor.py routing tasks to sub-agents (SUPV-05)."""
+
+    def test_assign_task_calls_route(self, tmp_path):
+        """assign_task() calls manage.py route with the task description."""
+        audit_log = tmp_path / "supervisor.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            # Mock subprocess.run: route returns agent slug, spawn succeeds
+            def fake_run(cmd, *args, **kwargs):
+                mock = MagicMock()
+                mock.returncode = 0
+                if "route" in cmd:
+                    mock.stdout = "  agent: contentagent\n"
+                else:
+                    mock.stdout = "SPAWN_READY:\n  agent: contentagent\n"
+                return mock
+
+            with patch("subprocess.run", side_effect=fake_run) as mock_run:
+                sup.assign_task("write an article about SEO", mission_id="m_test_001")
+
+        route_calls = [c for c in mock_run.call_args_list if "route" in str(c)]
+        assert len(route_calls) >= 1, f"Expected route call, got: {mock_run.call_args_list}"
+        route_cmd = route_calls[0][0][0]
+        assert "route" in route_cmd
+        assert "write an article about SEO" in route_cmd
+
+    def test_assign_task_calls_spawn(self, tmp_path):
+        """assign_task() calls manage.py spawn with --task and --mission-id after routing."""
+        audit_log = tmp_path / "supervisor.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+
+            def fake_run(cmd, *args, **kwargs):
+                mock = MagicMock()
+                mock.returncode = 0
+                if "route" in cmd:
+                    mock.stdout = "  agent: seoagent\n"
+                else:
+                    mock.stdout = "SPAWN_READY:\n  agent: seoagent\n"
+                return mock
+
+            with patch("subprocess.run", side_effect=fake_run) as mock_run:
+                sup.assign_task("optimize site SEO", mission_id="m_seo_001")
+
+        spawn_calls = [c for c in mock_run.call_args_list if "spawn" in str(c)]
+        assert len(spawn_calls) >= 1, f"Expected spawn call, got: {mock_run.call_args_list}"
+        spawn_cmd = spawn_calls[0][0][0]
+        assert "spawn" in spawn_cmd
+        assert "--task" in spawn_cmd
+        assert "--mission-id" in spawn_cmd
+        assert "m_seo_001" in spawn_cmd
+
+    def test_assign_task_audit(self, tmp_path):
+        """assign_task() writes audit record with op='assign_task', agent slug, mission_id."""
+        audit_log = tmp_path / "supervisor.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+
+            def fake_run(cmd, *args, **kwargs):
+                mock = MagicMock()
+                mock.returncode = 0
+                if "route" in cmd:
+                    mock.stdout = "  agent: researchagent\n"
+                else:
+                    mock.stdout = "SPAWN_READY:\n"
+                return mock
+
+            with patch("subprocess.run", side_effect=fake_run):
+                sup.assign_task("research competitor backlinks", mission_id="m_res_001")
+
+        lines = audit_log.read_text().strip().splitlines()
+        records = [json.loads(l) for l in lines if l.strip()]
+        assign_records = [r for r in records if r.get("op") == "assign_task"]
+        assert len(assign_records) >= 1, f"Expected assign_task audit record, got ops: {[r['op'] for r in records]}"
+        rec = assign_records[0]["data"]
+        assert "agent" in rec
+        assert "mission_id" in rec
+        assert rec["mission_id"] == "m_res_001"
+
+    def test_manage_spawn_accepts_mission_id(self, tmp_path):
+        """manage.py spawn <slug> --task <desc> --mission-id <id> does not error."""
+        result = subprocess.run(
+            [sys.executable, MANAGE_PATH, "spawn", "contentagent",
+             "--task", "write test article",
+             "--mission-id", "m_test_abc123"],
+            capture_output=True,
+            text=True,
+        )
+        # Should not error with 'unrecognized arguments'
+        assert "unrecognized arguments" not in result.stderr, (
+            f"manage.py spawn does not accept --mission-id: {result.stderr}"
+        )
+        assert "error" not in result.stderr.lower() or result.returncode == 0 or "not found" in result.stdout.lower(), (
+            f"Unexpected error: {result.stderr}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestManageMissionId — manage.py backward compat
+# ---------------------------------------------------------------------------
+
+class TestManageMissionId:
+    """Tests that manage.py spawn --mission-id is backward compatible (optional)."""
+
+    def test_spawn_without_mission_id(self):
+        """manage.py spawn still works without --mission-id (backward compatible)."""
+        result = subprocess.run(
+            [sys.executable, MANAGE_PATH, "spawn", "contentagent",
+             "--task", "write article without mission"],
+            capture_output=True,
+            text=True,
+        )
+        # Should not error on missing optional --mission-id
+        assert "unrecognized arguments" not in result.stderr
+        assert "--mission-id" not in result.stderr
+
+    def test_spawn_with_mission_id(self):
+        """manage.py spawn --mission-id includes mission_id in the task record."""
+        mission_id = "m_bc_test_xyz"
+        result = subprocess.run(
+            [sys.executable, MANAGE_PATH, "spawn", "contentagent",
+             "--task", "write article with mission",
+             "--mission-id", mission_id],
+            capture_output=True,
+            text=True,
+        )
+        # Should not crash. If the agent exists, output includes SPAWN_READY.
+        # If not found, that's OK too — we just need --mission-id to be accepted.
+        assert "unrecognized arguments" not in result.stderr, (
+            f"--mission-id not accepted: {result.stderr}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestPreExecHooks — SUPV-08
+#
+# Uses a mix of direct module import (for function-level tests) and subprocess
+# (for CLI exit-code tests). SUPERVISOR_BLOCKLIST_PATH env var isolates the
+# blocklist.json path; SUPERVISOR_AUDIT_LOG isolates audit output.
+# ---------------------------------------------------------------------------
+
+
+def _write_blocklist(path, patterns):
+    """Write a blocklist.json to path with the given patterns list."""
+    import json
+    blocklist = {"version": 1, "patterns": patterns}
+    path.write_text(json.dumps(blocklist))
+
+
+def _import_supervisor_fresh():
+    """Import (or reload) supervisor module so module-level env vars re-read from environ."""
+    import importlib
+    import supervisor as sup_module
+    importlib.reload(sup_module)
+    return sup_module
+
+
+class TestPreExecHooks:
+    """Tests for pre-check subcommand and pre_check() function (SUPV-08)."""
+
+    # -----------------------------------------------------------------------
+    # Helpers
+    # -----------------------------------------------------------------------
+
+    def _run_pre_check(self, action, blocklist_path, audit_log, dry_run=False):
+        """Run supervisor.py pre-check via subprocess."""
+        args = ["pre-check", "--action", action]
+        if dry_run:
+            args.append("--dry-run")
+        return run_supervisor(
+            args,
+            env={
+                "SUPERVISOR_BLOCKLIST_PATH": str(blocklist_path),
+                "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            },
+        )
+
+    def _call_pre_check(self, action, blocklist_path, audit_log, dry_run=False):
+        """Call pre_check() function directly with env isolation. Returns (allowed, reason)."""
+        env_patch = {
+            "SUPERVISOR_BLOCKLIST_PATH": str(blocklist_path),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+        }
+        old_env = {}
+        for k, v in env_patch.items():
+            old_env[k] = os.environ.get(k)
+            os.environ[k] = v
+        try:
+            sup = _import_supervisor_fresh()
+            return sup.pre_check(action, dry_run=dry_run)
+        finally:
+            for k, old_v in old_env.items():
+                if old_v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old_v
+
+    def _make_standard_blocklist(self, tmp_path):
+        """Create a standard blocklist.json in tmp_path with 4 initial patterns."""
+        bl_path = tmp_path / "blocklist.json"
+        _write_blocklist(bl_path, [
+            {"pattern": "delete.*all", "reason": "mass deletion blocked", "severity": "critical"},
+            {"pattern": "email.*blast", "reason": "bulk email blocked without review", "severity": "critical"},
+            {"pattern": "payment|purchase|buy|charge", "reason": "financial action requires Alex approval", "severity": "critical"},
+            {"pattern": "email.*[5-9][0-9][0-9]|email.*[0-9]{4,}", "reason": "email blast >500 blocked", "severity": "high"},
+        ])
+        return bl_path
+
+    # -----------------------------------------------------------------------
+    # Function-level tests (direct import)
+    # -----------------------------------------------------------------------
+
+    def test_pre_check_allows_safe_action(self, tmp_path):
+        """Safe action returns (True, '') — not matched by any blocklist pattern."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check("write article about SEO tips", bl, audit_log)
+        assert allowed is True
+        assert reason == ""
+
+    def test_pre_check_blocks_mass_delete(self, tmp_path):
+        """'delete all user data from database' matches delete.*all pattern."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check("delete all user data from database", bl, audit_log)
+        assert allowed is False
+        assert reason == "mass deletion blocked"
+
+    def test_pre_check_blocks_payment(self, tmp_path):
+        """'purchase domain example.com' matches payment pattern."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check("purchase domain example.com", bl, audit_log)
+        assert allowed is False
+        assert reason == "financial action requires Alex approval"
+
+    def test_pre_check_blocks_email_blast(self, tmp_path):
+        """'email blast 1000 subscribers' matches email.*blast or email.*[0-9]{4,} pattern."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check("email blast 1000 subscribers", bl, audit_log)
+        assert allowed is False
+        assert reason in ("bulk email blocked without review", "email blast >500 blocked")
+
+    def test_pre_check_blocks_bulk_email(self, tmp_path):
+        """'send email to 750 contacts' matches email.*[5-9][0-9][0-9] pattern."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check("send email to 750 contacts", bl, audit_log)
+        assert allowed is False
+        assert reason == "email blast >500 blocked"
+
+    def test_pre_check_case_insensitive(self, tmp_path):
+        """'DELETE ALL files' is blocked — matching is case-insensitive."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check("DELETE ALL files", bl, audit_log)
+        assert allowed is False
+        assert reason == "mass deletion blocked"
+
+    def test_pre_check_audit_allowed(self, tmp_path):
+        """Allowed action produces audit record with result='ALLOWED'."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        self._call_pre_check("write a blog post about Python", bl, audit_log)
+        assert audit_log.exists(), "audit log should be created"
+        lines = [l for l in audit_log.read_text().strip().splitlines() if l.strip()]
+        records = [json.loads(l) for l in lines]
+        pre_check_records = [r for r in records if r.get("op") == "pre_check"]
+        assert len(pre_check_records) >= 1
+        assert any(r["data"].get("result") == "ALLOWED" for r in pre_check_records)
+
+    def test_pre_check_audit_blocked(self, tmp_path):
+        """Blocked action produces audit record with result='BLOCKED' and reason."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        self._call_pre_check("delete all production records", bl, audit_log)
+        lines = [l for l in audit_log.read_text().strip().splitlines() if l.strip()]
+        records = [json.loads(l) for l in lines]
+        blocked_records = [
+            r for r in records
+            if r.get("op") == "pre_check" and r["data"].get("result") == "BLOCKED"
+        ]
+        assert len(blocked_records) >= 1
+        assert blocked_records[0]["data"].get("reason") == "mass deletion blocked"
+
+    def test_pre_check_empty_blocklist(self, tmp_path):
+        """Empty patterns list allows all actions."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist(bl, [])
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check("delete all user data", bl, audit_log)
+        assert allowed is True
+        assert reason == ""
+
+    def test_pre_check_dry_run(self, tmp_path):
+        """dry_run=True shows matched patterns but returns (True, '') — does not block."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check("delete all records", bl, audit_log, dry_run=True)
+        assert allowed is True, "dry-run should not block even if pattern matches"
+        assert reason == ""
+
+    def test_blocklist_file_missing(self, tmp_path):
+        """Missing blocklist.json allows all actions (fail-open) and writes warning to audit."""
+        non_existent = tmp_path / "does_not_exist.json"
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check("delete all data", non_existent, audit_log)
+        assert allowed is True
+        assert audit_log.exists(), "audit log should be created even on missing blocklist"
+
+    def test_blocklist_file_structure(self):
+        """blocklist.json has version int and patterns array with pattern/reason/severity per entry."""
+        bl_path = Path("/home/alex/.openclaw/workspace/memory/guardrails/blocklist.json")
+        assert bl_path.exists(), f"blocklist.json not found at {bl_path}"
+        data = json.loads(bl_path.read_text())
+        assert "version" in data, "blocklist.json missing 'version' key"
+        assert isinstance(data["version"], int)
+        assert "patterns" in data, "blocklist.json missing 'patterns' key"
+        assert isinstance(data["patterns"], list)
+        assert len(data["patterns"]) >= 4, f"Expected at least 4 patterns, got {len(data['patterns'])}"
+        for entry in data["patterns"]:
+            assert "pattern" in entry, f"Entry missing 'pattern': {entry}"
+            assert "reason" in entry, f"Entry missing 'reason': {entry}"
+            assert "severity" in entry, f"Entry missing 'severity': {entry}"
+
+    # -----------------------------------------------------------------------
+    # CLI exit-code tests (subprocess)
+    # -----------------------------------------------------------------------
+
+    def test_pre_check_cli_allows_safe_action(self, tmp_path):
+        """CLI: safe action exits 0 and prints ALLOWED."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        result = self._run_pre_check("write an article about Python", bl, audit_log)
+        assert result.returncode == 0, (
+            f"Expected exit 0, got {result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
+        assert "ALLOWED" in result.stdout
+
+    def test_pre_check_cli_blocks_mass_delete(self, tmp_path):
+        """CLI: 'delete all user data' exits 1 and prints BLOCKED."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        result = self._run_pre_check("delete all user data", bl, audit_log)
+        assert result.returncode == 1, f"Expected exit 1, got {result.returncode}"
+        assert "BLOCKED" in result.stdout
+
+    def test_pre_check_cli_dry_run_exits_0(self, tmp_path):
+        """CLI: --dry-run on a blocked action exits 0 (does not block)."""
+        bl = self._make_standard_blocklist(tmp_path)
+        audit_log = tmp_path / "supervisor.jsonl"
+        result = self._run_pre_check("delete all records", bl, audit_log, dry_run=True)
+        assert result.returncode == 0, (
+            f"Expected exit 0 for dry-run, got {result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
+        )
