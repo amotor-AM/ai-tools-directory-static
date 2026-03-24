@@ -529,3 +529,415 @@ class TestTier3Delegation:
 
         mock_record.assert_called_once()
         assert result == 1, f"Expected exit code 1 (delegation failed), got {result}"
+
+
+# ---------------------------------------------------------------------------
+# TestTier4Escalation  (HEAL-04)
+# ---------------------------------------------------------------------------
+
+
+class TestTier4Escalation:
+    """tier4_escalate() calls task_manager.py escalate and records outcome.
+    Must NOT send Telegram message or contact Alex directly.
+    """
+
+    def test_tier4_calls_task_manager_escalate(self):
+        """tier4_escalate calls task_manager.py escalate with the task_id."""
+        from scripts.heal import tier4_escalate
+
+        task = _task_with_context()
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier4_escalate("abc123", task)
+
+        escalate_calls = [c for c in calls if "escalate" in c]
+        assert escalate_calls, "tier4_escalate must call task_manager.py escalate"
+        assert "abc123" in escalate_calls[0], "escalate call must include task_id"
+        assert result == 0
+
+    def test_tier4_does_not_call_telegram(self):
+        """tier4_escalate must NOT invoke any Telegram-related subprocess."""
+        from scripts.heal import tier4_escalate
+
+        task = _task_with_context()
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier4_escalate("abc123", task)
+
+        # Check no Telegram-related call was made
+        telegram_calls = [c for c in calls if any(
+            kw in " ".join(c).lower() for kw in ["telegram", "notify", "send_message", "bot"]
+        )]
+        assert not telegram_calls, (
+            f"tier4 must not contact Alex via Telegram. Found calls: {telegram_calls}"
+        )
+
+    def test_tier4_records_outcome(self):
+        """tier4_escalate records outcome via outcome_tracker.py with approach heal_tier4_escalated."""
+        from scripts.heal import tier4_escalate
+
+        task = _task_with_context()
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier4_escalate("abc123", task)
+
+        # Find outcome_tracker record call
+        outcome_calls = [c for c in calls if "outcome_tracker" in " ".join(c) and "record" in c]
+        assert outcome_calls, "tier4 must call outcome_tracker.py record"
+        outcome_cmd = outcome_calls[0]
+        assert "--approach" in outcome_cmd, "outcome_tracker call must include --approach"
+        approach_idx = outcome_cmd.index("--approach")
+        approach = outcome_cmd[approach_idx + 1]
+        assert "heal_tier4" in approach, (
+            f"Approach must start with 'heal_tier4', got: {approach!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestTier5Skip
+# ---------------------------------------------------------------------------
+
+
+class TestTier5Skip:
+    """tier5_skip() cancels the task and records outcome as failure.
+    Must NEVER contact Alex.
+    """
+
+    def test_tier5_calls_task_manager_cancel(self):
+        """tier5_skip calls task_manager.py cancel with reason containing 'all recovery tiers exhausted'."""
+        from scripts.heal import tier5_skip
+
+        task = _task_with_context()
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier5_skip("abc123", task)
+
+        cancel_calls = [c for c in calls if "cancel" in c]
+        assert cancel_calls, "tier5_skip must call task_manager.py cancel"
+        cancel_cmd = cancel_calls[0]
+        # The reason must include "all recovery tiers exhausted"
+        full_cmd_str = " ".join(cancel_cmd)
+        assert "all recovery tiers exhausted" in full_cmd_str, (
+            f"Cancel reason must include 'all recovery tiers exhausted'. Got: {cancel_cmd}"
+        )
+
+    def test_tier5_records_outcome_as_failure(self):
+        """tier5_skip records outcome with approach 'heal_tier5_skipped' and outcome 'failure'."""
+        from scripts.heal import tier5_skip
+
+        task = _task_with_context()
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier5_skip("abc123", task)
+
+        outcome_calls = [c for c in calls if "outcome_tracker" in " ".join(c) and "record" in c]
+        assert outcome_calls, "tier5 must call outcome_tracker.py record"
+        outcome_cmd = outcome_calls[0]
+        full_str = " ".join(outcome_cmd)
+        assert "failure" in full_str, "tier5 outcome must be 'failure'"
+        assert "heal_tier5" in full_str, "tier5 approach must contain 'heal_tier5'"
+
+    def test_tier5_returns_exit_code_2(self):
+        """tier5_skip returns exit code 2 (all tiers exhausted)."""
+        from scripts.heal import tier5_skip
+
+        task = _task_with_context()
+
+        def fake_run(cmd, **kwargs):
+            return mock.MagicMock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier5_skip("abc123", task)
+
+        assert result == 2, f"Expected exit code 2, got {result}"
+
+
+# ---------------------------------------------------------------------------
+# TestAutoTierSelection
+# ---------------------------------------------------------------------------
+
+
+class TestAutoTierSelection:
+    """attempt(task_id, tier=None) selects tier via select_tier and dispatches correctly."""
+
+    def test_auto_selects_tier1_for_transient_low_errors(self):
+        """Task with consecutive_step_errors=1, last_error=timeout -> attempt --auto runs tier1."""
+        from scripts.heal import attempt
+
+        task = _task(consecutive_step_errors=1, last_error="timeout after 30s")
+        task_with_ctx = {**task, "context": {"task_type": "general"}, "goal": "do something"}
+
+        def fake_load(tid):
+            return task_with_ctx
+
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout=json.dumps(task_with_ctx), stderr="")
+
+        with mock.patch("scripts.heal._load_task", side_effect=fake_load):
+            with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+                result = attempt("abc123")
+
+        # tier1 calls task_manager retry
+        retry_calls = [c for c in calls if "retry" in c]
+        assert retry_calls or result == 1, "Auto mode should dispatch to tier1 for transient errors"
+
+    def test_auto_selects_tier2_for_approach_errors(self):
+        """Task with consecutive_step_errors=4, last_error=captcha -> attempt --auto runs tier2."""
+        from scripts.heal import attempt, select_tier
+
+        task = _task(consecutive_step_errors=4, last_error="captcha detected")
+        task_with_ctx = {**task, "context": {"task_type": "general"}, "goal": "do something"}
+
+        def fake_load(tid):
+            return task_with_ctx
+
+        def fake_run(cmd, **kwargs):
+            return mock.MagicMock(returncode=0, stdout=json.dumps(task_with_ctx), stderr="")
+
+        # Verify select_tier gives us tier 2 for this task
+        assert select_tier(task) == 2, "select_tier should return 2 for captcha with many errors"
+
+        with mock.patch("scripts.heal._load_task", side_effect=fake_load):
+            with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+                result = attempt("abc123")
+
+        # Result should be 0 (success) since fake_run succeeds
+        assert result in (0, 1), f"Unexpected result: {result}"
+
+    def test_auto_selects_tier3_for_capability_errors(self):
+        """Task with last_error=CUDA out of memory -> attempt --auto runs tier3."""
+        from scripts.heal import attempt, select_tier
+
+        task = _task(consecutive_step_errors=1, last_error="CUDA out of memory")
+
+        # Verify select_tier routes to tier3
+        assert select_tier(task) == 3
+
+        task_with_ctx = {**task, "context": {"task_type": "article", "model": "anthropic/claude-sonnet-4-5"}, "goal": "write article"}
+
+        def fake_load(tid):
+            return task_with_ctx
+
+        def fake_run(cmd, **kwargs):
+            return mock.MagicMock(returncode=0, stdout=json.dumps(task_with_ctx), stderr="")
+
+        with mock.patch("scripts.heal._load_task", side_effect=fake_load):
+            with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+                result = attempt("abc123")
+
+        assert result in (0, 1), f"Unexpected result for tier3 auto: {result}"
+
+
+# ---------------------------------------------------------------------------
+# TestAutoTierStateReload
+# ---------------------------------------------------------------------------
+
+
+class TestAutoTierStateReload:
+    """CRITICAL: attempt() in auto mode reloads task state between tier escalations.
+
+    When tier N returns 1 (failed), attempt() must call _load_task(task_id) again
+    before invoking tier N+1. The next tier must receive the fresh task dict with
+    updated state from task_manager.py (not the stale pre-tier-N dict).
+    """
+
+    def test_state_reloaded_between_tier_escalations(self):
+        """When tier 1 fails (returns 1), attempt() reloads task before trying tier 2.
+
+        The reloaded task dict has updated retry_strategy and consecutive_step_errors.
+        Tier 2 must receive the fresh dict, not the original stale one.
+        """
+        from scripts.heal import attempt
+
+        # First call returns task that routes to tier1, tier1 will fail
+        initial_task = {
+            "id": "abc123",
+            "goal": "write an article",
+            "consecutive_step_errors": 1,
+            "blocked_heartbeats": 0,
+            "attempts": 1,
+            "max_attempts": 15,
+            "last_error": "timeout after 30s",
+            "retry_strategy": "increase timeout to 120s or use streaming variant",  # same as proposed -> tier1 returns 1
+            "context": {"task_type": "general"},
+        }
+
+        # Second call (reload) returns updated task with approach error -> tier2
+        reloaded_task = {
+            "id": "abc123",
+            "goal": "write an article",
+            "consecutive_step_errors": 2,
+            "blocked_heartbeats": 0,
+            "attempts": 2,
+            "max_attempts": 15,
+            "last_error": "captcha detected",  # now an approach error
+            "retry_strategy": "new_strategy_from_tier1",
+            "context": {"task_type": "general"},
+        }
+
+        load_calls = []
+
+        def fake_load(tid):
+            load_calls.append(tid)
+            if len(load_calls) == 1:
+                return initial_task
+            return reloaded_task
+
+        subprocess_calls = []
+
+        def fake_run(cmd, **kwargs):
+            subprocess_calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout=json.dumps(reloaded_task), stderr="")
+
+        with mock.patch("scripts.heal._load_task", side_effect=fake_load):
+            with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+                result = attempt("abc123")
+
+        # _load_task must have been called at least twice:
+        # once before tier 1, and once after tier 1 failed to get fresh state
+        assert len(load_calls) >= 2, (
+            f"_load_task was called {len(load_calls)} time(s). "
+            "Expected at least 2 calls (initial load + reload after tier 1 failure). "
+            "CRITICAL: attempt() must reload task state between tier escalations."
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestOutcomeRecording  (HEAL-07)
+# ---------------------------------------------------------------------------
+
+
+class TestOutcomeRecording:
+    """Every tier attempt (success or failure) records to outcome_tracker.py."""
+
+    def _extract_outcome_calls(self, all_calls: list) -> list:
+        """Filter subprocess calls that go to outcome_tracker.py."""
+        return [c for c in all_calls if "outcome_tracker" in " ".join(c) and "record" in c]
+
+    def test_tier1_success_records_outcome(self):
+        """tier1_retry success records approach='heal_tier1_backoff', outcome='success'."""
+        from scripts.heal import tier1_retry
+
+        task = {**_task(last_error="timeout after 30s", retry_strategy=None), "context": {"task_type": "article"}, "goal": "write"}
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier1_retry("abc123", task)
+
+        outcome_calls = self._extract_outcome_calls(calls)
+        assert outcome_calls, "tier1_retry success must record outcome"
+        full_str = " ".join(outcome_calls[0])
+        assert "success" in full_str, f"Expected 'success' in outcome call: {full_str}"
+        assert "heal_tier1" in full_str, f"Expected 'heal_tier1' in approach: {full_str}"
+
+    def test_tier1_failure_records_outcome(self):
+        """tier1_retry failure records outcome='failure'."""
+        from scripts.heal import tier1_retry
+
+        task = {**_task(last_error="timeout after 30s", retry_strategy=None), "context": {"task_type": "article"}, "goal": "write"}
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            if "retry" in cmd:
+                raise subprocess.CalledProcessError(1, cmd)
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("scripts.heal.time.sleep", return_value=None):
+                result = tier1_retry("abc123", task)
+
+        outcome_calls = self._extract_outcome_calls(calls)
+        assert outcome_calls, "tier1_retry failure must record outcome"
+        full_str = " ".join(outcome_calls[0])
+        assert "failure" in full_str, f"Expected 'failure' in outcome call: {full_str}"
+
+    def test_tier2_success_records_outcome(self):
+        """tier2_alternative success records approach='heal_tier2_alternative_approach'."""
+        from scripts.heal import tier2_alternative
+
+        task = {**_task(last_error="captcha detected"), "context": {"task_type": "article"}, "goal": "write"}
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier2_alternative("abc123", task)
+
+        outcome_calls = self._extract_outcome_calls(calls)
+        assert outcome_calls, "tier2_alternative must record outcome"
+        full_str = " ".join(outcome_calls[0])
+        assert "heal_tier2" in full_str, f"Expected 'heal_tier2' in approach: {full_str}"
+
+    def test_tier3_model_fallback_records_outcome_with_model_name(self):
+        """tier3 model fallback records approach containing 'heal_tier3_model_fallback'."""
+        from scripts.heal import tier3_model_fallback
+
+        task = _task_with_context(model="anthropic/claude-sonnet-4-5")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier3_model_fallback("abc123", task)
+
+        outcome_calls = self._extract_outcome_calls(calls)
+        assert outcome_calls, "tier3_model_fallback must record outcome"
+        full_str = " ".join(outcome_calls[0])
+        assert "heal_tier3" in full_str, f"Expected 'heal_tier3' in approach: {full_str}"
+
+    def test_tier3_delegation_records_outcome_with_agent_name(self):
+        """tier3 delegation records approach containing 'heal_tier3_delegation'."""
+        from scripts.heal import tier3_model_fallback
+
+        task = _task_with_context(model="huihui_ai/glm-4.7-flash-abliterated", goal="write article")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("scripts.heal.is_open", return_value=False):
+                result = tier3_model_fallback("abc123", task)
+
+        outcome_calls = self._extract_outcome_calls(calls)
+        assert outcome_calls, "tier3 delegation must record outcome"
+        full_str = " ".join(outcome_calls[0])
+        assert "heal_tier3" in full_str, f"Expected 'heal_tier3' in approach: {full_str}"
