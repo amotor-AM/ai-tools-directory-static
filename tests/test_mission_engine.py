@@ -1256,3 +1256,477 @@ class TestNextTask:
         assert idx_high >= 0, f"high001 not found in output: {output}"
         assert idx_low >= 0, f"low001 not found in output: {output}"
         assert idx_high < idx_low, f"High priority task should appear before low priority. Output: {output}"
+
+
+# =============================================================================
+# Plan 02-03: KPI lifecycle — auto-select, update-kpi, stall detection,
+#             recurring task re-creation, adapt subcommand.
+# Uses direct import + unittest.mock.patch for fast isolated testing.
+# =============================================================================
+
+def _create_mission_file_with_kpis(mission_dir, mission_id, goal="Test goal",
+                                    priority=3, status="ACTIVE",
+                                    kpis=None, tasks=None, stall_count=0, strategy=""):
+    """Helper: create a mission JSON with custom kpis and tasks."""
+    from datetime import datetime, timezone
+    mission = {
+        "id": mission_id,
+        "goal": goal,
+        "original_goal": goal,
+        "status": status,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "kpis": kpis or [],
+        "tasks": tasks or [],
+        "strategy": strategy or goal,
+        "stall_count": stall_count,
+        "priority": priority,
+    }
+    path = mission_dir / f"mission_{mission_id}.json"
+    with open(path, "w") as f:
+        import json
+        json.dump(mission, f, indent=2)
+    # Write ledger entry
+    ledger_path = mission_dir / "ledger.json"
+    if ledger_path.exists():
+        with open(ledger_path) as f:
+            import json
+            ledger = json.load(f)
+    else:
+        ledger = {"missions": [], "updated_at": ""}
+    ledger["missions"].append({
+        "id": mission_id,
+        "goal": goal,
+        "status": status,
+        "priority": priority,
+        "kpi_summary": "",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    with open(ledger_path, "w") as f:
+        import json
+        json.dump(ledger, f, indent=2)
+    return mission, path
+
+
+# --- MISS-08: KPI auto-selection ---
+
+class TestKPIAutoSelect:
+    def test_traffic_goal_selects_gsc_clicks(self, mission_dir):
+        """Mission with 'traffic' in goal auto-selects gsc_clicks KPI."""
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        kpis = mission_engine.auto_select_kpis("Increase traffic from SEO")
+        metrics = [k["metric"] for k in kpis]
+        assert "gsc_clicks" in metrics, f"Expected gsc_clicks, got: {metrics}"
+
+    def test_books_goal_selects_books_published(self, mission_dir):
+        """Mission with 'books' in goal auto-selects books_published KPI."""
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        kpis = mission_engine.auto_select_kpis("Publish 3 books on KDP")
+        metrics = [k["metric"] for k in kpis]
+        assert "books_published" in metrics, f"Expected books_published, got: {metrics}"
+
+    def test_revenue_goal_selects_monthly_revenue(self, mission_dir):
+        """Mission with 'revenue' in goal auto-selects monthly_revenue KPI."""
+        import mission_engine
+        kpis = mission_engine.auto_select_kpis("Grow monthly revenue to $1000")
+        metrics = [k["metric"] for k in kpis]
+        assert "monthly_revenue" in metrics, f"Expected monthly_revenue, got: {metrics}"
+
+    def test_followers_goal_selects_follower_count(self, mission_dir):
+        """Mission with 'followers' in goal auto-selects follower_count KPI."""
+        import mission_engine
+        kpis = mission_engine.auto_select_kpis("Get 500 followers on Twitter")
+        metrics = [k["metric"] for k in kpis]
+        assert "follower_count" in metrics, f"Expected follower_count, got: {metrics}"
+
+    def test_articles_goal_selects_articles_published(self, mission_dir):
+        """Mission with 'articles' in goal auto-selects articles_published KPI."""
+        import mission_engine
+        kpis = mission_engine.auto_select_kpis("Write 10 articles about Python")
+        metrics = [k["metric"] for k in kpis]
+        assert "articles_published" in metrics, f"Expected articles_published, got: {metrics}"
+
+    def test_no_keyword_returns_empty(self, mission_dir):
+        """Mission with no recognized keyword returns empty KPI list."""
+        import mission_engine
+        kpis = mission_engine.auto_select_kpis("Do something vague")
+        assert kpis == [], f"Expected empty list, got: {kpis}"
+
+    def test_auto_select_deduplicates_metrics(self, mission_dir):
+        """Goals with multiple synonyms for same metric return only one KPI per metric."""
+        import mission_engine
+        # "traffic" and "seo" both map to gsc_clicks
+        kpis = mission_engine.auto_select_kpis("Grow seo traffic and get more visits")
+        metrics = [k["metric"] for k in kpis]
+        # gsc_clicks should appear only once even though traffic, seo, visits all match
+        assert metrics.count("gsc_clicks") <= 2, f"gsc_clicks duplicated: {metrics}"
+        # unique metrics
+        assert len(metrics) == len(set(metrics)), f"Duplicate metrics found: {metrics}"
+
+    def test_create_mission_with_traffic_goal_has_kpi(self, mission_dir):
+        """create command with 'traffic' goal populates kpis in mission file."""
+        r = run_me("create", "--goal", "Grow organic traffic from SEO",
+                   env_override={"MISSION_DIR": str(mission_dir)})
+        assert r.returncode == 0, f"create failed: {r.stderr}"
+        mission_id = extract_mission_id(r.stdout)
+        m = get_mission_file(mission_dir, mission_id)
+        assert len(m["kpis"]) > 0, f"Expected KPIs to be auto-selected, got empty: {m['kpis']}"
+        metrics = [k["metric"] for k in m["kpis"]]
+        assert "gsc_clicks" in metrics, f"Expected gsc_clicks, got: {metrics}"
+
+    def test_create_mission_no_keyword_has_empty_kpis(self, mission_dir):
+        """create command with unrecognized goal leaves kpis empty (for decompose to fill)."""
+        r = run_me("create", "--goal", "Set up workspace organization",
+                   env_override={"MISSION_DIR": str(mission_dir)})
+        assert r.returncode == 0
+        mission_id = extract_mission_id(r.stdout)
+        m = get_mission_file(mission_dir, mission_id)
+        assert m["kpis"] == [], f"Expected empty KPIs, got: {m['kpis']}"
+
+
+# --- MISS-06: KPI completion triggers COMPLETED status ---
+
+class TestKPICompletion:
+    def test_all_kpis_met_transitions_to_completed(self, mission_dir):
+        """update_kpi with all KPIs met sets status to COMPLETED."""
+        _create_mission_file_with_kpis(
+            mission_dir, "kpi00001",
+            goal="Grow traffic",
+            status="ACTIVE",
+            kpis=[
+                {"metric": "gsc_clicks", "target": 1000, "current": 0, "met": False},
+            ]
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        import io, sys
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        args = MagicMock()
+        args.mission_id = "kpi00001"
+        args.kpi_metric = "gsc_clicks"
+        args.kpi_value = "1500"
+        args.check_stall = False
+        # archive will try to move the file; that's fine in temp dir
+        with redirect_stdout(buf):
+            mission_engine.update_kpi(args)
+        output = buf.getvalue()
+        assert "MISSION_COMPLETE" in output, f"Expected MISSION_COMPLETE, got: {output}"
+
+    def test_partial_kpis_met_does_not_complete(self, mission_dir):
+        """update_kpi with only some KPIs met does NOT set COMPLETED."""
+        _create_mission_file_with_kpis(
+            mission_dir, "kpi00002",
+            goal="Grow traffic and revenue",
+            status="ACTIVE",
+            kpis=[
+                {"metric": "gsc_clicks", "target": 1000, "current": 0, "met": False},
+                {"metric": "monthly_revenue", "target": 500, "current": 0, "met": False},
+            ]
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        args = MagicMock()
+        args.mission_id = "kpi00002"
+        args.kpi_metric = "gsc_clicks"
+        args.kpi_value = "1500"
+        args.check_stall = False
+        with redirect_stdout(buf):
+            mission_engine.update_kpi(args)
+        output = buf.getvalue()
+        assert "MISSION_COMPLETE" not in output, \
+            f"Should NOT complete with only one KPI met: {output}"
+        # Mission status should still be ACTIVE
+        mission, _ = mission_engine.load_mission("kpi00002")
+        assert mission["status"] == "ACTIVE", f"Expected ACTIVE, got: {mission['status']}"
+
+    def test_kpi_value_updated_in_mission_file(self, mission_dir):
+        """update_kpi persists the new current value to the mission file."""
+        _create_mission_file_with_kpis(
+            mission_dir, "kpi00003",
+            status="ACTIVE",
+            kpis=[{"metric": "articles_published", "target": 10, "current": 0, "met": False}]
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        args = MagicMock()
+        args.mission_id = "kpi00003"
+        args.kpi_metric = "articles_published"
+        args.kpi_value = "5"
+        args.check_stall = False
+        import io
+        from contextlib import redirect_stdout
+        with redirect_stdout(io.StringIO()):
+            mission_engine.update_kpi(args)
+        mission, _ = mission_engine.load_mission("kpi00003")
+        kpi = next(k for k in mission["kpis"] if k["metric"] == "articles_published")
+        assert kpi["current"] == 5, f"Expected current=5, got: {kpi['current']}"
+
+    def test_kpi_met_flag_set_when_target_reached(self, mission_dir):
+        """update_kpi sets met=True when current >= target."""
+        _create_mission_file_with_kpis(
+            mission_dir, "kpi00004",
+            status="ACTIVE",
+            kpis=[{"metric": "books_published", "target": 2, "current": 0, "met": False}]
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        args = MagicMock()
+        args.mission_id = "kpi00004"
+        args.kpi_metric = "books_published"
+        args.kpi_value = "3"
+        args.check_stall = False
+        import io
+        from contextlib import redirect_stdout
+        with redirect_stdout(io.StringIO()):
+            mission_engine.update_kpi(args)
+        # mission may be archived; check archive or active
+        try:
+            mission, _ = mission_engine.load_mission("kpi00004")
+        except SystemExit:
+            # may be archived
+            archive_path = mission_dir / "archive" / "mission_kpi00004.json"
+            with open(archive_path) as f:
+                import json
+                mission = json.load(f)
+        kpi = next(k for k in mission["kpis"] if k["metric"] == "books_published")
+        assert kpi["met"] is True, f"Expected met=True, got: {kpi['met']}"
+
+
+# --- MISS-09: Stall detection ---
+
+class TestStallDetection:
+    def test_check_stall_increments_stall_count_when_no_progress(self, mission_dir, task_state_dir):
+        """update_kpi --check-stall increments stall_count when no tasks completed."""
+        _create_mission_file_with_kpis(
+            mission_dir, "stl00001",
+            status="ACTIVE",
+            tasks=[{"task_id": "s001", "goal": "Do thing", "type": "one-time",
+                    "cadence": None, "status": "CREATED", "requires_gpu": False}],
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+        # Create task file with CREATED status (not done)
+        _create_task_file(task_state_dir, "s001", "CREATED", "Do thing")
+
+        args = MagicMock()
+        args.mission_id = "stl00001"
+        args.kpi_metric = None
+        args.kpi_value = None
+        args.check_stall = True
+        import io
+        from contextlib import redirect_stdout
+        with redirect_stdout(io.StringIO()):
+            mission_engine.update_kpi(args)
+        mission, _ = mission_engine.load_mission("stl00001")
+        assert mission["stall_count"] == 1, f"Expected stall_count=1, got: {mission['stall_count']}"
+
+    def test_check_stall_resets_when_task_completed(self, mission_dir, task_state_dir):
+        """update_kpi --check-stall resets stall_count to 0 when a task completes."""
+        _create_mission_file_with_kpis(
+            mission_dir, "stl00002",
+            status="ACTIVE",
+            stall_count=2,
+            tasks=[{"task_id": "s002", "goal": "Do thing", "type": "one-time",
+                    "cadence": None, "status": "DONE", "requires_gpu": False}],
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+        # Task file shows DONE
+        _create_task_file(task_state_dir, "s002", "DONE", "Do thing")
+
+        args = MagicMock()
+        args.mission_id = "stl00002"
+        args.kpi_metric = None
+        args.kpi_value = None
+        args.check_stall = True
+        import io
+        from contextlib import redirect_stdout
+        with redirect_stdout(io.StringIO()):
+            mission_engine.update_kpi(args)
+        mission, _ = mission_engine.load_mission("stl00002")
+        assert mission["stall_count"] == 0, f"Expected stall_count=0 after reset, got: {mission['stall_count']}"
+
+    def test_check_stall_at_3_sets_stalled_status(self, mission_dir, task_state_dir):
+        """update_kpi --check-stall sets status to STALLED when stall_count reaches 3."""
+        _create_mission_file_with_kpis(
+            mission_dir, "stl00003",
+            status="ACTIVE",
+            stall_count=2,  # will become 3 after this check
+            tasks=[{"task_id": "s003", "goal": "Do thing", "type": "one-time",
+                    "cadence": None, "status": "CREATED", "requires_gpu": False}],
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+        _create_task_file(task_state_dir, "s003", "CREATED", "Do thing")
+
+        args = MagicMock()
+        args.mission_id = "stl00003"
+        args.kpi_metric = None
+        args.kpi_value = None
+        args.check_stall = True
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            mission_engine.update_kpi(args)
+        output = buf.getvalue()
+        assert "MISSION_STALLED" in output, f"Expected MISSION_STALLED in output: {output}"
+        mission, _ = mission_engine.load_mission("stl00003")
+        assert mission["status"] == "STALLED", f"Expected STALLED, got: {mission['status']}"
+
+    def test_check_stall_prints_adapt_recommended_at_3(self, mission_dir, task_state_dir):
+        """update_kpi prints ADAPT_RECOMMENDED when stall_count reaches 3."""
+        _create_mission_file_with_kpis(
+            mission_dir, "stl00004",
+            status="ACTIVE",
+            stall_count=2,
+            tasks=[{"task_id": "s004", "goal": "Do thing", "type": "one-time",
+                    "cadence": None, "status": "CREATED", "requires_gpu": False}],
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+        _create_task_file(task_state_dir, "s004", "CREATED", "Do thing")
+
+        args = MagicMock()
+        args.mission_id = "stl00004"
+        args.kpi_metric = None
+        args.kpi_value = None
+        args.check_stall = True
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            mission_engine.update_kpi(args)
+        output = buf.getvalue()
+        assert "ADAPT_RECOMMENDED" in output, f"Expected ADAPT_RECOMMENDED, got: {output}"
+
+
+# --- Recurring task re-creation ---
+
+class TestRecurringReCreation:
+    def test_recurring_task_due_creates_new_task(self, mission_dir, task_state_dir):
+        """Recurring task that is DONE and whose next run is overdue gets re-created."""
+        import time, json as _json
+        from datetime import datetime, timezone, timedelta
+        # Create a task that completed 2 hours ago with a "every 30 min" cadence
+        # so next run is overdue
+        completed_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        _create_task_file(task_state_dir, "rec001", "DONE", "Post daily update")
+        # Patch completed_at in the task file
+        task_path = task_state_dir / "task_rec001.json"
+        with open(task_path) as f:
+            t = _json.load(f)
+        t["completed_at"] = completed_at
+        with open(task_path, "w") as f:
+            _json.dump(t, f)
+
+        _create_mission_file_with_kpis(
+            mission_dir, "rec00001",
+            status="ACTIVE",
+            tasks=[{
+                "task_id": "rec001",
+                "goal": "Post daily update",
+                "type": "recurring",
+                "cadence": "*/30 * * * *",  # every 30 min
+                "status": "DONE",
+                "requires_gpu": False,
+            }],
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        # Mock subprocess so task_manager create doesn't actually run
+        with patch("mission_engine.subprocess") as mock_sub:
+            mock_proc = MagicMock()
+            mock_proc.returncode = 0
+            mock_proc.stdout = "CREATED: task_rec002\n"
+            mock_sub.run.return_value = mock_proc
+
+            args = MagicMock()
+            args.mission_id = "rec00001"
+            args.kpi_metric = None
+            args.kpi_value = None
+            args.check_stall = False
+            import io
+            from contextlib import redirect_stdout
+            with redirect_stdout(io.StringIO()):
+                mission_engine.update_kpi(args)
+
+            # Subprocess should have been called to create new task
+            assert mock_sub.run.called, "Expected subprocess.run to be called for re-creation"
+
+    def test_recurring_task_not_due_does_not_recreate(self, mission_dir, task_state_dir):
+        """Recurring task whose next run is not yet due is NOT re-created."""
+        import json as _json
+        from datetime import datetime, timezone
+        # Task just completed right now — next run is far in the future
+        completed_at = datetime.now(timezone.utc).isoformat()
+        _create_task_file(task_state_dir, "rec002", "DONE", "Post weekly update")
+        task_path = task_state_dir / "task_rec002.json"
+        with open(task_path) as f:
+            t = _json.load(f)
+        t["completed_at"] = completed_at
+        with open(task_path, "w") as f:
+            _json.dump(t, f)
+
+        _create_mission_file_with_kpis(
+            mission_dir, "rec00002",
+            status="ACTIVE",
+            tasks=[{
+                "task_id": "rec002",
+                "goal": "Post weekly update",
+                "type": "recurring",
+                "cadence": "0 9 * * 1",  # every Monday 9am
+                "status": "DONE",
+                "requires_gpu": False,
+            }],
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        with patch("mission_engine.subprocess") as mock_sub:
+            args = MagicMock()
+            args.mission_id = "rec00002"
+            args.kpi_metric = None
+            args.kpi_value = None
+            args.check_stall = False
+            import io
+            from contextlib import redirect_stdout
+            with redirect_stdout(io.StringIO()):
+                mission_engine.update_kpi(args)
+
+            # Subprocess should NOT have been called (not due yet)
+            assert not mock_sub.run.called, \
+                "Expected no subprocess.run for not-yet-due recurring task"
