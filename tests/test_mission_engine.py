@@ -1,15 +1,21 @@
-"""Tests for mission_engine.py — covers MISS-01, MISS-03, MISS-04, MISS-07, MISS-10.
+"""Tests for mission_engine.py — covers MISS-01, MISS-03, MISS-04, MISS-07, MISS-10,
+MISS-02, MISS-05, MISS-11, TASK-01, TASK-02, TASK-05, TASK-06, TASK-07.
 
 All tests use subprocess invocation (same pattern as test_task_manager_phase1.py)
-and MISSION_DIR env var for full isolation.
+and MISSION_DIR env var for full isolation. LLM-dependent tests use direct import
+with unittest.mock.patch to avoid real API calls.
 """
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 import pytest
+
+sys.path.insert(0, "/home/alex/.openclaw/workspace/scripts")
+sys.path.insert(0, "/home/alex/.openclaw/workspace/skills/aria-taskmanager/scripts")
 
 ME_SCRIPT = "/home/alex/.openclaw/workspace/scripts/mission_engine.py"
 EC_SCRIPT = "/home/alex/.openclaw/workspace/scripts/event_chains.py"
@@ -392,3 +398,861 @@ class TestEventChainGuard:
             f"CHAIN_SKIPPED should NOT appear for normal tasks"
         # Either fires chains or no matches — both acceptable, but not skipped
         assert r.returncode == 0
+
+
+# =============================================================================
+# Plan 02-02: LLM-powered features — decompose, classify, next-task
+# Uses direct import + unittest.mock.patch for fast isolated testing.
+# =============================================================================
+
+def _make_mock_sonnet_decompose(mission_id="test123"):
+    """Return MagicMock that simulates client.beta.messages.parse() result."""
+    from output_schema import MissionDecompositionOutput
+    mock_result = MagicMock()
+    mock_result.parsed = MissionDecompositionOutput(
+        mission_id=mission_id,
+        subtasks=[
+            "Research competitor sites",
+            "Write 5 SEO articles",
+            "Submit to Google indexing",
+        ],
+        kpis=["GSC clicks > 1000/month", "5 articles published"],
+        cadence=None,
+    )
+    return mock_result
+
+
+def _make_mock_ambiguity(is_ambiguous=False, question=None, confidence=0.85):
+    """Return MagicMock that simulates ambiguity parse result."""
+    mock_result = MagicMock()
+    mock_result.parsed = MagicMock()
+    mock_result.parsed.is_ambiguous = is_ambiguous
+    mock_result.parsed.missing_info = ["who", "what"] if is_ambiguous else []
+    mock_result.parsed.clarification_question = question or ("What domain?" if is_ambiguous else None)
+    mock_result.parsed.confidence = confidence
+    return mock_result
+
+
+def _make_mock_classification(task_type="one-time", confidence=0.9, cadence=None):
+    """Return MagicMock that simulates ollama.chat() classification result."""
+    mock_response = MagicMock()
+    mock_response.message = MagicMock()
+    import json as _json
+    mock_response.message.content = _json.dumps({
+        "task_type": task_type,
+        "confidence": confidence,
+        "cadence": cadence,
+        "reasoning": f"This is a {task_type} task.",
+    })
+    return mock_response
+
+
+def _make_mock_enrichment(complexity=3, requires_gpu=False):
+    """Return MagicMock that simulates ollama.chat() enrichment result."""
+    mock_response = MagicMock()
+    mock_response.message = MagicMock()
+    import json as _json
+    mock_response.message.content = _json.dumps({
+        "complexity": complexity,
+        "requires_gpu": requires_gpu,
+        "reasoning": "Standard task.",
+    })
+    return mock_response
+
+
+def _create_mission_file(mission_dir, mission_id, goal="Test goal", priority=3, status="INBOX"):
+    """Helper: create a mission JSON file directly for testing."""
+    from datetime import datetime, timezone
+    mission = {
+        "id": mission_id,
+        "goal": goal,
+        "original_goal": goal,
+        "status": status,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "kpis": [],
+        "tasks": [],
+        "strategy": "",
+        "stall_count": 0,
+        "priority": priority,
+    }
+    path = mission_dir / f"mission_{mission_id}.json"
+    with open(path, "w") as f:
+        json.dump(mission, f, indent=2)
+    # Also write ledger entry
+    ledger_path = mission_dir / "ledger.json"
+    if ledger_path.exists():
+        with open(ledger_path) as f:
+            ledger = json.load(f)
+    else:
+        ledger = {"missions": [], "updated_at": ""}
+    ledger["missions"].append({
+        "id": mission_id,
+        "goal": goal,
+        "status": status,
+        "priority": priority,
+        "kpi_summary": "",
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    })
+    with open(ledger_path, "w") as f:
+        json.dump(ledger, f, indent=2)
+    return mission, path
+
+
+def _create_task_file(task_dir, task_id, status="CREATED", goal="Do something"):
+    """Helper: create a task state JSON file for next-task tests."""
+    from datetime import datetime, timezone
+    task = {
+        "id": task_id,
+        "goal": goal,
+        "status": status,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "context": {},
+        "source": "mission-subtask",
+    }
+    path = task_dir / f"task_{task_id}.json"
+    with open(path, "w") as f:
+        json.dump(task, f, indent=2)
+    return task, path
+
+
+# --- MISS-02 / TASK-01: Mission Decompose (mocked LLM) ---
+
+class TestMissionDecompose:
+    def test_decompose_updates_mission_to_active(self, mission_dir, task_state_dir):
+        """decompose_mission sets mission status from INBOX to ACTIVE."""
+        _create_mission_file(mission_dir, "abc00001", goal="Grow SEO traffic", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=False),  # ambiguity check
+            _make_mock_sonnet_decompose("abc00001"),    # decompose
+        ]
+
+        # ollama.chat returns classification, then enrichment for each subtask (3 subtasks)
+        ollama_responses = []
+        for _ in range(3):
+            ollama_responses.append(_make_mock_classification("one-time", 0.9))
+            ollama_responses.append(_make_mock_enrichment(3, False))
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = ollama_responses
+
+            # Also mock the subprocess call to task_manager.py
+            with patch("mission_engine.subprocess") as mock_sub:
+                mock_proc = MagicMock()
+                mock_proc.returncode = 0
+                mock_proc.stdout = "CREATED: task_sub00001\n"
+                mock_sub.run.return_value = mock_proc
+
+                args = MagicMock()
+                args.mission_id = "abc00001"
+                mission_engine.decompose_mission(args)
+
+        mission, _ = mission_engine.load_mission("abc00001")
+        assert mission["status"] == "ACTIVE", f"Expected ACTIVE, got {mission['status']}"
+
+    def test_decompose_creates_tasks_array(self, mission_dir, task_state_dir):
+        """decompose_mission populates mission tasks array."""
+        _create_mission_file(mission_dir, "abc00002", goal="Grow SEO traffic", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=False),
+            _make_mock_sonnet_decompose("abc00002"),
+        ]
+
+        ollama_responses = []
+        for i in range(3):
+            ollama_responses.append(_make_mock_classification("one-time", 0.9))
+            ollama_responses.append(_make_mock_enrichment(3, False))
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = ollama_responses
+
+            with patch("mission_engine.subprocess") as mock_sub:
+                mock_proc = MagicMock()
+                mock_proc.returncode = 0
+                mock_proc.stdout = "CREATED: task_sub00002\n"
+                mock_sub.run.return_value = mock_proc
+
+                args = MagicMock()
+                args.mission_id = "abc00002"
+                mission_engine.decompose_mission(args)
+
+        mission, _ = mission_engine.load_mission("abc00002")
+        assert len(mission["tasks"]) == 3, f"Expected 3 tasks, got {len(mission['tasks'])}"
+
+    def test_decompose_task_includes_required_fields(self, mission_dir, task_state_dir):
+        """Each task entry in mission tasks array has task_id, goal, type, status, requires_gpu."""
+        _create_mission_file(mission_dir, "abc00003", goal="Grow SEO traffic", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=False),
+            _make_mock_sonnet_decompose("abc00003"),
+        ]
+
+        ollama_responses = []
+        for _ in range(3):
+            ollama_responses.append(_make_mock_classification("one-time", 0.9))
+            ollama_responses.append(_make_mock_enrichment(3, False))
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = ollama_responses
+
+            with patch("mission_engine.subprocess") as mock_sub:
+                mock_proc = MagicMock()
+                mock_proc.returncode = 0
+                mock_proc.stdout = "CREATED: task_sub00003\n"
+                mock_sub.run.return_value = mock_proc
+
+                args = MagicMock()
+                args.mission_id = "abc00003"
+                mission_engine.decompose_mission(args)
+
+        mission, _ = mission_engine.load_mission("abc00003")
+        for task_entry in mission["tasks"]:
+            assert "task_id" in task_entry, f"Missing task_id in {task_entry}"
+            assert "goal" in task_entry, f"Missing goal in {task_entry}"
+            assert "type" in task_entry, f"Missing type in {task_entry}"
+            assert "status" in task_entry, f"Missing status in {task_entry}"
+            assert "requires_gpu" in task_entry, f"Missing requires_gpu in {task_entry}"
+
+    def test_decompose_calls_task_manager_with_mission_id_and_source(self, mission_dir, task_state_dir):
+        """decompose_mission calls task_manager.py with --mission-id and --source mission-subtask."""
+        _create_mission_file(mission_dir, "abc00004", goal="Grow SEO traffic", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=False),
+            _make_mock_sonnet_decompose("abc00004"),
+        ]
+
+        ollama_responses = []
+        for _ in range(3):
+            ollama_responses.append(_make_mock_classification("one-time", 0.9))
+            ollama_responses.append(_make_mock_enrichment(3, False))
+
+        calls_made = []
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = ollama_responses
+
+            with patch("mission_engine.subprocess") as mock_sub:
+                def capture_call(*args, **kwargs):
+                    calls_made.append(args[0] if args else kwargs.get("args", []))
+                    mock_proc = MagicMock()
+                    mock_proc.returncode = 0
+                    mock_proc.stdout = "CREATED: task_sub00004\n"
+                    return mock_proc
+                mock_sub.run.side_effect = capture_call
+
+                mission_arg = MagicMock()
+                mission_arg.mission_id = "abc00004"
+                mission_engine.decompose_mission(mission_arg)
+
+        assert len(calls_made) > 0, "No subprocess calls made"
+        # Check that at least one call has --mission-id and --source mission-subtask
+        found_mission_id = False
+        found_source = False
+        for call in calls_made:
+            cmd_str = " ".join(str(c) for c in call)
+            if "--mission-id" in cmd_str and "abc00004" in cmd_str:
+                found_mission_id = True
+            if "--source" in cmd_str and "mission-subtask" in cmd_str:
+                found_source = True
+        assert found_mission_id, f"--mission-id abc00004 not found in calls: {calls_made}"
+        assert found_source, f"--source mission-subtask not found in calls: {calls_made}"
+
+    def test_decompose_handles_duplicate_exit_code_2(self, mission_dir, task_state_dir):
+        """decompose_mission handles exit code 2 (duplicate) gracefully."""
+        _create_mission_file(mission_dir, "abc00005", goal="Grow SEO traffic", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=False),
+            _make_mock_sonnet_decompose("abc00005"),
+        ]
+
+        ollama_responses = []
+        for _ in range(3):
+            ollama_responses.append(_make_mock_classification("one-time", 0.9))
+            ollama_responses.append(_make_mock_enrichment(3, False))
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = ollama_responses
+
+            with patch("mission_engine.subprocess") as mock_sub:
+                mock_proc = MagicMock()
+                mock_proc.returncode = 2  # DUPLICATE_REJECTED
+                mock_proc.stdout = ""
+                mock_sub.run.return_value = mock_proc
+
+                # Should not raise an exception
+                args = MagicMock()
+                args.mission_id = "abc00005"
+                mission_engine.decompose_mission(args)  # no exception = pass
+
+    def test_decompose_kpis_stored_in_mission(self, mission_dir, task_state_dir):
+        """decompose_mission stores KPIs from Sonnet decomposition in mission file."""
+        _create_mission_file(mission_dir, "abc00006", goal="Grow SEO traffic", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=False),
+            _make_mock_sonnet_decompose("abc00006"),
+        ]
+
+        ollama_responses = []
+        for _ in range(3):
+            ollama_responses.append(_make_mock_classification("one-time", 0.9))
+            ollama_responses.append(_make_mock_enrichment(3, False))
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = ollama_responses
+
+            with patch("mission_engine.subprocess") as mock_sub:
+                mock_proc = MagicMock()
+                mock_proc.returncode = 0
+                mock_proc.stdout = "CREATED: task_sub00006\n"
+                mock_sub.run.return_value = mock_proc
+
+                args = MagicMock()
+                args.mission_id = "abc00006"
+                mission_engine.decompose_mission(args)
+
+        mission, _ = mission_engine.load_mission("abc00006")
+        assert len(mission["kpis"]) == 2, f"Expected 2 KPIs, got {len(mission['kpis'])}"
+        # KPIs should be stored as dicts with at least 'metric' field
+        for kpi in mission["kpis"]:
+            assert "metric" in kpi, f"KPI missing 'metric' field: {kpi}"
+
+
+# --- TASK-01: Standalone classify subcommand ---
+
+class TestTaskClassify:
+    def test_classify_one_time_task(self, mission_dir):
+        """classify_task returns one-time for 'write intro blog post'."""
+        import mission_engine
+        with patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = [
+                _make_mock_classification("one-time", 0.92),
+            ]
+            result = mission_engine.classify_task("write intro blog post")
+        assert result.task_type == "one-time"
+        assert result.confidence >= 0.9
+
+    def test_classify_recurring_task(self, mission_dir):
+        """classify_task returns recurring with cadence for 'post to Reddit daily'."""
+        import mission_engine
+        with patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = [
+                _make_mock_classification("recurring", 0.95, "0 9 * * *"),
+            ]
+            result = mission_engine.classify_task("post to Reddit daily")
+        assert result.task_type == "recurring"
+        assert result.cadence == "0 9 * * *"
+
+    def test_classify_returns_taskclassification_object(self, mission_dir):
+        """classify_task returns a TaskClassification instance."""
+        import mission_engine
+        with patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = [
+                _make_mock_classification("one-time", 0.85),
+            ]
+            result = mission_engine.classify_task("do something once")
+        assert isinstance(result, mission_engine.TaskClassification)
+
+    @pytest.mark.slow
+    def test_classify_live_one_time(self, mission_dir):
+        """Live Qwen3 call: classify a one-time task."""
+        import mission_engine
+        result = mission_engine.classify_task("write an intro blog post about Python")
+        assert result.task_type in ("one-time", "recurring")
+        assert 0.0 <= result.confidence <= 1.0
+
+    @pytest.mark.slow
+    def test_classify_live_recurring(self, mission_dir):
+        """Live Qwen3 call: classify a recurring task."""
+        import mission_engine
+        result = mission_engine.classify_task("post daily updates to Reddit every morning")
+        assert result.task_type == "recurring"
+
+
+# --- TASK-02: Cron cadence extraction ---
+
+class TestCadenceExtraction:
+    def test_cadence_stored_in_mission_task(self, mission_dir, task_state_dir):
+        """Recurring subtask gets cron cadence stored in mission task entry."""
+        from output_schema import MissionDecompositionOutput
+        _create_mission_file(mission_dir, "cad00001", goal="Post daily SEO updates", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        mock_result = MagicMock()
+        mock_result.parsed = MissionDecompositionOutput(
+            mission_id="cad00001",
+            subtasks=["Post to Reddit daily"],
+            kpis=["100 karma/month"],
+            cadence=None,
+        )
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=False),
+            mock_result,
+        ]
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama:
+            # classification: recurring with cadence
+            mock_ollama.chat.side_effect = [
+                _make_mock_classification("recurring", 0.95, "0 8 * * *"),
+                _make_mock_enrichment(2, False),
+            ]
+
+            with patch("mission_engine.subprocess") as mock_sub:
+                mock_proc = MagicMock()
+                mock_proc.returncode = 0
+                mock_proc.stdout = "CREATED: task_cad00001\n"
+                mock_sub.run.return_value = mock_proc
+
+                args = MagicMock()
+                args.mission_id = "cad00001"
+                mission_engine.decompose_mission(args)
+
+        mission, _ = mission_engine.load_mission("cad00001")
+        assert len(mission["tasks"]) == 1
+        task_entry = mission["tasks"][0]
+        assert task_entry["type"] == "recurring", f"Expected recurring, got {task_entry['type']}"
+        assert task_entry["cadence"] == "0 8 * * *", f"Expected cron cadence, got {task_entry.get('cadence')}"
+
+    @pytest.mark.slow
+    def test_cadence_live_extraction(self, mission_dir):
+        """Live Qwen3 call: cadence extracted from recurring task description."""
+        import mission_engine
+        result = mission_engine.classify_task("submit Reddit posts every morning at 8am")
+        assert result.task_type == "recurring"
+        # cadence may be None (Qwen3 might not always extract cron) — just verify no crash
+
+
+# --- TASK-05: Low confidence triggers clarification ---
+
+class TestClassifyAmbiguity:
+    def test_low_confidence_sets_needs_clarification(self, mission_dir, capsys):
+        """classify subcommand with confidence < 0.6 prints NEEDS_CLARIFICATION."""
+        with patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = [
+                _make_mock_classification("one-time", 0.4),  # low confidence
+            ]
+            import mission_engine
+            args = MagicMock()
+            args.description = "do something vague"
+            mission_engine.classify_subcommand(args)
+
+        captured = capsys.readouterr()
+        assert "NEEDS_CLARIFICATION" in captured.out, \
+            f"Expected NEEDS_CLARIFICATION in output: {captured.out}"
+
+    def test_high_confidence_no_clarification(self, mission_dir, capsys):
+        """classify subcommand with confidence >= 0.6 does NOT print NEEDS_CLARIFICATION."""
+        with patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = [
+                _make_mock_classification("one-time", 0.9),
+            ]
+            import mission_engine
+            args = MagicMock()
+            args.description = "write a blog post about Python"
+            mission_engine.classify_subcommand(args)
+
+        captured = capsys.readouterr()
+        assert "NEEDS_CLARIFICATION" not in captured.out
+        assert "TYPE:" in captured.out
+
+
+# --- TASK-06: Complexity score stored in task context ---
+
+class TestComplexityRouting:
+    def test_complexity_stored_in_task_context(self, mission_dir, task_state_dir):
+        """Each subtask gets complexity score stored in task context (for model routing)."""
+        from output_schema import MissionDecompositionOutput
+        _create_mission_file(mission_dir, "cpx00001", goal="Build complex system", priority=1)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        mock_result = MagicMock()
+        mock_result.parsed = MissionDecompositionOutput(
+            mission_id="cpx00001",
+            subtasks=["Design architecture"],
+            kpis=["System deployed"],
+            cadence=None,
+        )
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=False),
+            mock_result,
+        ]
+
+        captured_cmds = []
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = [
+                _make_mock_classification("one-time", 0.9),
+                _make_mock_enrichment(4, False),  # complexity=4
+            ]
+
+            with patch("mission_engine.subprocess") as mock_sub:
+                def capture(cmd, **kwargs):
+                    captured_cmds.append(cmd)
+                    p = MagicMock()
+                    p.returncode = 0
+                    p.stdout = "CREATED: task_cpx00001\n"
+                    return p
+                mock_sub.run.side_effect = capture
+
+                args = MagicMock()
+                args.mission_id = "cpx00001"
+                mission_engine.decompose_mission(args)
+
+        # Verify subprocess call includes complexity in context JSON
+        assert len(captured_cmds) > 0, "No subprocess calls"
+        cmd_str = " ".join(str(c) for c in captured_cmds[0])
+        assert "complexity" in cmd_str, f"'complexity' not found in subprocess cmd: {cmd_str}"
+        assert "4" in cmd_str, f"complexity value 4 not found in cmd: {cmd_str}"
+
+
+# --- TASK-07: Dependency order preserved ---
+
+class TestDependencyOrder:
+    def test_tasks_preserve_decomposition_order(self, mission_dir, task_state_dir):
+        """Mission tasks array preserves subtask ordering from Sonnet decomposition."""
+        from output_schema import MissionDecompositionOutput
+        _create_mission_file(mission_dir, "dep00001", goal="Multi-step pipeline", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        subtasks = ["Step 1: research", "Step 2: write", "Step 3: publish"]
+        mock_result = MagicMock()
+        mock_result.parsed = MissionDecompositionOutput(
+            mission_id="dep00001",
+            subtasks=subtasks,
+            kpis=["Published"],
+            cadence=None,
+        )
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=False),
+            mock_result,
+        ]
+
+        ollama_responses = []
+        for _ in range(3):
+            ollama_responses.append(_make_mock_classification("one-time", 0.9))
+            ollama_responses.append(_make_mock_enrichment(2, False))
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = ollama_responses
+
+            with patch("mission_engine.subprocess") as mock_sub:
+                mock_proc = MagicMock()
+                mock_proc.returncode = 0
+                mock_proc.stdout = "CREATED: task_dep00001\n"
+                mock_sub.run.return_value = mock_proc
+
+                args = MagicMock()
+                args.mission_id = "dep00001"
+                mission_engine.decompose_mission(args)
+
+        mission, _ = mission_engine.load_mission("dep00001")
+        assert len(mission["tasks"]) == 3
+        for i, task_entry in enumerate(mission["tasks"]):
+            assert subtasks[i] in task_entry["goal"], \
+                f"Task {i} goal mismatch: expected '{subtasks[i]}', got '{task_entry['goal']}'"
+
+
+# --- MISS-11: Ambiguity check gates decomposition ---
+
+class TestAmbiguityCheck:
+    def test_ambiguous_goal_exits_with_code_3(self, mission_dir, task_state_dir, capsys):
+        """Ambiguous goal triggers CLARIFICATION_NEEDED and does not decompose."""
+        _create_mission_file(mission_dir, "amb00001", goal="do something about the website", priority=3)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=True, question="What should be done with the website?", confidence=0.9),
+        ]
+
+        with patch("mission_engine.Anthropic", return_value=mock_client):
+            with pytest.raises(SystemExit) as exc_info:
+                args = MagicMock()
+                args.mission_id = "amb00001"
+                mission_engine.decompose_mission(args)
+
+        assert exc_info.value.code == 3, f"Expected exit code 3, got {exc_info.value.code}"
+        captured = capsys.readouterr()
+        assert "CLARIFICATION_NEEDED" in captured.out
+
+    def test_ambiguous_goal_does_not_create_tasks(self, mission_dir, task_state_dir):
+        """Ambiguous goal aborts before creating any tasks."""
+        _create_mission_file(mission_dir, "amb00002", goal="make money somehow", priority=3)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=True, question="Make money how?", confidence=0.95),
+        ]
+
+        with patch("mission_engine.Anthropic", return_value=mock_client):
+            with pytest.raises(SystemExit):
+                args = MagicMock()
+                args.mission_id = "amb00002"
+                mission_engine.decompose_mission(args)
+
+        mission, _ = mission_engine.load_mission("amb00002")
+        assert mission["tasks"] == [], f"Tasks should be empty for ambiguous goal, got {mission['tasks']}"
+        assert mission["status"] == "INBOX", f"Status should remain INBOX, got {mission['status']}"
+
+    def test_clear_goal_proceeds_to_decompose(self, mission_dir, task_state_dir):
+        """Clear goal passes ambiguity check and proceeds to decompose."""
+        _create_mission_file(mission_dir, "amb00003", goal="Write 5 SEO articles about Python", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = [
+            _make_mock_ambiguity(is_ambiguous=False, confidence=0.95),
+            _make_mock_sonnet_decompose("amb00003"),
+        ]
+
+        ollama_responses = []
+        for _ in range(3):
+            ollama_responses.append(_make_mock_classification("one-time", 0.9))
+            ollama_responses.append(_make_mock_enrichment(2, False))
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama:
+            mock_ollama.chat.side_effect = ollama_responses
+
+            with patch("mission_engine.subprocess") as mock_sub:
+                mock_proc = MagicMock()
+                mock_proc.returncode = 0
+                mock_proc.stdout = "CREATED: task_amb00003\n"
+                mock_sub.run.return_value = mock_proc
+
+                args = MagicMock()
+                args.mission_id = "amb00003"
+                mission_engine.decompose_mission(args)  # should not raise
+
+        mission, _ = mission_engine.load_mission("amb00003")
+        assert mission["status"] == "ACTIVE"
+
+
+# --- MISS-05: next-task subcommand ---
+
+class TestNextTask:
+    def test_next_task_returns_first_created(self, mission_dir, task_state_dir):
+        """next-task returns first CREATED task in dependency order."""
+        _create_mission_file(mission_dir, "nxt00001", goal="Multi-step work", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        # Set up mission with 3 tasks
+        mission, path = mission_engine.load_mission("nxt00001")
+        mission["tasks"] = [
+            {"task_id": "t001", "goal": "Step 1", "type": "one-time", "status": "CREATED", "requires_gpu": False},
+            {"task_id": "t002", "goal": "Step 2", "type": "one-time", "status": "CREATED", "requires_gpu": False},
+            {"task_id": "t003", "goal": "Step 3", "type": "one-time", "status": "CREATED", "requires_gpu": False},
+        ]
+        mission_engine.save_mission(mission, path)
+
+        # Create corresponding task files
+        _create_task_file(task_state_dir, "t001", "CREATED", "Step 1")
+        _create_task_file(task_state_dir, "t002", "CREATED", "Step 2")
+        _create_task_file(task_state_dir, "t003", "CREATED", "Step 3")
+
+        import io
+        from contextlib import redirect_stdout
+        f = io.StringIO()
+        with redirect_stdout(f):
+            args = MagicMock()
+            args.mission_id = "nxt00001"
+            args.all_missions = False
+            mission_engine.next_task(args)
+        output = f.getvalue()
+        assert "NEXT_TASK:" in output, f"Expected NEXT_TASK: in output: {output}"
+        assert "t001" in output, f"Expected t001 as first task, got: {output}"
+
+    def test_next_task_skips_done(self, mission_dir, task_state_dir):
+        """next-task skips DONE tasks and returns next eligible."""
+        _create_mission_file(mission_dir, "nxt00002", goal="Multi-step work", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        mission, path = mission_engine.load_mission("nxt00002")
+        mission["tasks"] = [
+            {"task_id": "d001", "goal": "Done task", "type": "one-time", "status": "DONE", "requires_gpu": False},
+            {"task_id": "d002", "goal": "Active task", "type": "one-time", "status": "CREATED", "requires_gpu": False},
+        ]
+        mission_engine.save_mission(mission, path)
+
+        _create_task_file(task_state_dir, "d001", "DONE", "Done task")
+        _create_task_file(task_state_dir, "d002", "CREATED", "Active task")
+
+        import io
+        from contextlib import redirect_stdout
+        f = io.StringIO()
+        with redirect_stdout(f):
+            args = MagicMock()
+            args.mission_id = "nxt00002"
+            args.all_missions = False
+            mission_engine.next_task(args)
+        output = f.getvalue()
+        assert "d002" in output, f"Expected d002 as next task after skipping DONE, got: {output}"
+
+    def test_next_task_skips_running(self, mission_dir, task_state_dir):
+        """next-task skips RUNNING tasks (already in progress)."""
+        _create_mission_file(mission_dir, "nxt00003", goal="Multi-step work", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        mission, path = mission_engine.load_mission("nxt00003")
+        mission["tasks"] = [
+            {"task_id": "r001", "goal": "Running task", "type": "one-time", "status": "RUNNING", "requires_gpu": False},
+            {"task_id": "r002", "goal": "Pending task", "type": "one-time", "status": "CREATED", "requires_gpu": False},
+        ]
+        mission_engine.save_mission(mission, path)
+
+        _create_task_file(task_state_dir, "r001", "RUNNING", "Running task")
+        _create_task_file(task_state_dir, "r002", "CREATED", "Pending task")
+
+        import io
+        from contextlib import redirect_stdout
+        f = io.StringIO()
+        with redirect_stdout(f):
+            args = MagicMock()
+            args.mission_id = "nxt00003"
+            args.all_missions = False
+            mission_engine.next_task(args)
+        output = f.getvalue()
+        assert "r002" in output, f"Expected r002 after skipping RUNNING, got: {output}"
+
+    def test_next_task_all_done_returns_no_tasks_available(self, mission_dir, task_state_dir):
+        """next-task prints NO_TASKS_AVAILABLE when all tasks are done."""
+        _create_mission_file(mission_dir, "nxt00004", goal="Done mission", priority=2)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        mission, path = mission_engine.load_mission("nxt00004")
+        mission["tasks"] = [
+            {"task_id": "a001", "goal": "Completed task", "type": "one-time", "status": "DONE", "requires_gpu": False},
+        ]
+        mission_engine.save_mission(mission, path)
+
+        _create_task_file(task_state_dir, "a001", "DONE", "Completed task")
+
+        import io
+        from contextlib import redirect_stdout
+        f = io.StringIO()
+        with redirect_stdout(f):
+            args = MagicMock()
+            args.mission_id = "nxt00004"
+            args.all_missions = False
+            mission_engine.next_task(args)
+        output = f.getvalue()
+        assert "NO_TASKS_AVAILABLE" in output, f"Expected NO_TASKS_AVAILABLE, got: {output}"
+
+    def test_next_task_all_missions_respects_priority(self, mission_dir, task_state_dir):
+        """next-task --all-missions returns tasks in priority order."""
+        _create_mission_file(mission_dir, "all00001", goal="Low priority mission", priority=4)
+        _create_mission_file(mission_dir, "all00002", goal="High priority mission", priority=1)
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        for mid, tid, goal in [("all00001", "low001", "Low priority task"), ("all00002", "high001", "High priority task")]:
+            mission, path = mission_engine.load_mission(mid)
+            mission["tasks"] = [
+                {"task_id": tid, "goal": goal, "type": "one-time", "status": "CREATED", "requires_gpu": False},
+            ]
+            mission_engine.save_mission(mission, path)
+            _create_task_file(task_state_dir, tid, "CREATED", goal)
+
+        import io
+        from contextlib import redirect_stdout
+        f = io.StringIO()
+        with redirect_stdout(f):
+            args = MagicMock()
+            args.all_missions = True
+            args.mission_id = None
+            mission_engine.next_task(args)
+        output = f.getvalue()
+
+        # High priority (P1) task should appear before low priority (P4) task
+        idx_high = output.find("high001")
+        idx_low = output.find("low001")
+        assert idx_high >= 0, f"high001 not found in output: {output}"
+        assert idx_low >= 0, f"low001 not found in output: {output}"
+        assert idx_high < idx_low, f"High priority task should appear before low priority. Output: {output}"
