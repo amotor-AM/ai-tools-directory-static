@@ -27,3 +27,17 @@ def task_state_dir(tmp_path):
     os.environ["ARIA_TASK_DIR"] = str(sdir)
     yield sdir
     del os.environ["ARIA_TASK_DIR"]
+
+
+@pytest.fixture
+def heal_test_dir(tmp_path):
+    """Isolated growth directory for circuit breaker tests.
+
+    Sets HEAL_TEST_DIR so circuit_breaker.py writes to tmp_path instead of
+    the production memory/growth/circuit-breakers.json path.
+    """
+    hdir = tmp_path / "growth"
+    hdir.mkdir()
+    os.environ["HEAL_TEST_DIR"] = str(hdir)
+    yield hdir
+    del os.environ["HEAL_TEST_DIR"]
