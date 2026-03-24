@@ -36,10 +36,13 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
+
+from croniter import croniter as Croniter
 
 from pydantic import BaseModel, Field
 
@@ -81,6 +84,29 @@ TASK_STATE_DIR = Path(os.environ.get(
 
 # Path to task_manager.py — resolved at runtime for subprocess calls
 TM_PATH = Path("/home/alex/.openclaw/workspace/skills/aria-taskmanager/scripts/task_manager.py")
+
+# ---------------------------------------------------------------------------
+# KPI auto-selection mapping — keyword → KPI dict
+# Deduplicated by metric name during auto_select_kpis()
+# ---------------------------------------------------------------------------
+
+KPI_MAP = {
+    "traffic":   {"metric": "gsc_clicks",          "target": "TBD", "current": 0, "met": False},
+    "seo":       {"metric": "gsc_clicks",          "target": "TBD", "current": 0, "met": False},
+    "visits":    {"metric": "monthly_visits",      "target": "TBD", "current": 0, "met": False},
+    "followers": {"metric": "follower_count",      "target": "TBD", "current": 0, "met": False},
+    "social":    {"metric": "follower_count",      "target": "TBD", "current": 0, "met": False},
+    "audience":  {"metric": "follower_count",      "target": "TBD", "current": 0, "met": False},
+    "revenue":   {"metric": "monthly_revenue",     "target": "TBD", "current": 0, "met": False},
+    "sales":     {"metric": "monthly_revenue",     "target": "TBD", "current": 0, "met": False},
+    "income":    {"metric": "monthly_revenue",     "target": "TBD", "current": 0, "met": False},
+    "articles":  {"metric": "articles_published",  "target": "TBD", "current": 0, "met": False},
+    "content":   {"metric": "articles_published",  "target": "TBD", "current": 0, "met": False},
+    "posts":     {"metric": "articles_published",  "target": "TBD", "current": 0, "met": False},
+    "books":     {"metric": "books_published",     "target": "TBD", "current": 0, "met": False},
+    "publish":   {"metric": "books_published",     "target": "TBD", "current": 0, "met": False},
+    "launch":    {"metric": "books_published",     "target": "TBD", "current": 0, "met": False},
+}
 
 # Mission status values
 VALID_STATUSES = {"INBOX", "ACTIVE", "ADAPTING", "STALLED", "COMPLETED"}
@@ -241,6 +267,61 @@ def _compute_progress(mission: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
+# KPI auto-selection
+# ---------------------------------------------------------------------------
+
+def auto_select_kpis(goal: str) -> list:
+    """Auto-select KPIs based on keyword matching in the goal string.
+
+    Deduplicates by metric name so that synonyms (e.g. 'traffic' + 'seo')
+    only produce one entry per metric.
+
+    Returns an empty list if no keyword matches — decompose will populate KPIs.
+    """
+    goal_lower = goal.lower()
+    seen_metrics: set = set()
+    kpis = []
+    for keyword, kpi_template in KPI_MAP.items():
+        if keyword in goal_lower and kpi_template["metric"] not in seen_metrics:
+            seen_metrics.add(kpi_template["metric"])
+            kpis.append(dict(kpi_template))  # fresh copy so mutations don't affect KPI_MAP
+    return kpis
+
+
+# ---------------------------------------------------------------------------
+# Mission meta file helpers (sidecar — keeps schema-strict mission JSON clean)
+# ---------------------------------------------------------------------------
+
+def _meta_dir() -> Path:
+    """Return the meta directory for sidecar files, creating if needed."""
+    meta = MISSIONS_DIR / "meta"
+    meta.mkdir(parents=True, exist_ok=True)
+    return meta
+
+
+def _load_meta(mission_id: str) -> dict:
+    """Load sidecar meta file for a mission. Returns default if not found."""
+    path = _meta_dir() / f"mission_{mission_id}_meta.json"
+    if not path.exists():
+        return {"last_done_count": 0}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {"last_done_count": 0}
+
+
+def _save_meta(mission_id: str, meta: dict) -> None:
+    """Save sidecar meta file for a mission atomically."""
+    meta_dir = _meta_dir()
+    path = meta_dir / f"mission_{mission_id}_meta.json"
+    tmp_path = path.with_suffix(".json.tmp")
+    with open(tmp_path, "w") as f:
+        json.dump(meta, f, indent=2)
+    os.rename(tmp_path, path)
+
+
+# ---------------------------------------------------------------------------
 # LLM helper functions
 # ---------------------------------------------------------------------------
 
@@ -332,6 +413,8 @@ def create_mission(args):
     mission_id = short_id()
     path = MISSIONS_DIR / f"mission_{mission_id}.json"
 
+    auto_kpis = auto_select_kpis(args.goal)
+
     mission = {
         "id": mission_id,
         "goal": args.goal,
@@ -339,7 +422,7 @@ def create_mission(args):
         "status": "INBOX",
         "created_at": now_iso(),
         "updated_at": now_iso(),
-        "kpis": [],
+        "kpis": auto_kpis,
         "tasks": [],
         "strategy": "",
         "stall_count": 0,
@@ -721,6 +804,166 @@ def _next_task_all_missions():
 
 
 # ---------------------------------------------------------------------------
+# Recurring task re-creation
+# ---------------------------------------------------------------------------
+
+def check_recurring_tasks(mission: dict) -> None:
+    """Check all recurring tasks; re-create via task_manager.py if cadence is due.
+
+    Called at the end of update_kpi after every update cycle.
+    """
+    for task_entry in mission.get("tasks", []):
+        if task_entry.get("type") != "recurring" or not task_entry.get("cadence"):
+            continue
+
+        task_id = task_entry.get("task_id")
+        if not task_id:
+            continue
+
+        task_file = TASK_STATE_DIR / f"task_{task_id}.json"
+        if not task_file.exists():
+            continue
+
+        try:
+            with open(task_file) as f:
+                task_data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        if task_data.get("status") != "DONE":
+            continue
+
+        completed_at = task_data.get("completed_at")
+        if not completed_at:
+            continue
+
+        try:
+            completed_ts = datetime.fromisoformat(completed_at).timestamp()
+        except (ValueError, AttributeError):
+            continue
+
+        try:
+            c = Croniter(task_entry["cadence"], completed_ts)
+            if c.get_next() <= time.time():
+                # Re-create the recurring task via task_manager.py
+                cmd = [
+                    sys.executable,
+                    str(TM_PATH),
+                    "create",
+                    "--goal", task_entry["goal"],
+                    "--mission-id", mission["id"],
+                    "--source", "mission-subtask",
+                    "--priority", str(mission.get("priority", 3)),
+                ]
+                if task_entry.get("requires_gpu"):
+                    cmd.append("--requires-gpu")
+                subprocess.run(cmd, capture_output=True, text=True)
+        except Exception:
+            # croniter errors (bad cron string, etc.) are non-fatal
+            pass
+
+
+# ---------------------------------------------------------------------------
+# KPI update and lifecycle management (Plan 03)
+# ---------------------------------------------------------------------------
+
+def update_kpi(args):
+    """Update KPI values for a mission and check for completion or stall.
+
+    Args:
+        --mission-id: Required. Mission ID to update.
+        --kpi-metric: Optional. Metric name to update.
+        --kpi-value:  Optional. New current value for the metric.
+        --check-stall: Flag. Run stall detection based on task progress.
+    """
+    mission, path = load_mission(args.mission_id)
+
+    # --- Update specific KPI value ---
+    if getattr(args, "kpi_metric", None) and getattr(args, "kpi_value", None) is not None:
+        metric_name = args.kpi_metric
+        try:
+            new_value = float(args.kpi_value)
+        except (ValueError, TypeError):
+            new_value = args.kpi_value
+
+        for kpi in mission.get("kpis", []):
+            if kpi["metric"] == metric_name:
+                kpi["current"] = new_value
+                # Mark as met if numeric target is reached
+                target = kpi.get("target")
+                if isinstance(target, (int, float)) and isinstance(new_value, (int, float)):
+                    if new_value >= target:
+                        kpi["met"] = True
+                break
+
+    # --- Check if ALL KPIs are met => COMPLETED ---
+    kpis = mission.get("kpis", [])
+    if kpis and all(k.get("met") for k in kpis):
+        mission["status"] = "COMPLETED"
+        mission["updated_at"] = now_iso()
+        save_mission(mission, path)
+        update_ledger(args.mission_id, mission["goal"], "COMPLETED", mission.get("priority", 3))
+        # Archive the mission
+        archive_args = type("A", (), {"mission_id": args.mission_id})()
+        archive_mission(archive_args)
+        print(f"MISSION_COMPLETE: mission_{args.mission_id} — all KPIs met")
+        return
+
+    # --- Stall detection ---
+    if getattr(args, "check_stall", False):
+        meta = _load_meta(args.mission_id)
+        last_done_count = meta.get("last_done_count", 0)
+
+        # Count tasks with DONE status from live task files
+        current_done_count = 0
+        for task_entry in mission.get("tasks", []):
+            task_id = task_entry.get("task_id")
+            if not task_id:
+                continue
+            task_file = TASK_STATE_DIR / f"task_{task_id}.json"
+            if task_file.exists():
+                try:
+                    with open(task_file) as f:
+                        task_data = json.load(f)
+                    if task_data.get("status") in DONE_TASK_STATUSES:
+                        current_done_count += 1
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+        if current_done_count > last_done_count:
+            # Progress was made — reset stall counter
+            mission["stall_count"] = 0
+            meta["last_done_count"] = current_done_count
+        else:
+            # No new completions — increment stall
+            mission["stall_count"] = mission.get("stall_count", 0) + 1
+
+        if mission["stall_count"] >= 3:
+            mission["status"] = "STALLED"
+            print(f"MISSION_STALLED: mission_{args.mission_id} — "
+                  f"{mission['stall_count']} heartbeats with no progress")
+            print(f"ADAPT_RECOMMENDED: Run 'mission_engine.py adapt --mission-id {args.mission_id}'")
+
+        _save_meta(args.mission_id, meta)
+
+    # --- Recurring task re-creation ---
+    check_recurring_tasks(mission)
+
+    # --- Persist updated mission ---
+    mission["updated_at"] = now_iso()
+    save_mission(mission, path)
+
+    # Build kpi_summary for ledger
+    kpi_summary = "; ".join(
+        f"{k['metric']}={k.get('current', 0)}/{k.get('target', 'TBD')}"
+        for k in kpis
+    ) if kpis else ""
+
+    update_ledger(args.mission_id, mission["goal"], mission["status"],
+                  mission.get("priority", 3), kpi_summary)
+
+
+# ---------------------------------------------------------------------------
 # Argparse setup
 # ---------------------------------------------------------------------------
 
@@ -756,9 +999,13 @@ def main():
     p_classify = sub.add_parser("classify", help="Classify a task description as one-time or recurring")
     p_classify.add_argument("--description", required=True, help="Task description to classify")
 
-    # --- update-kpi (Plan 03) ---
-    p_kpi = sub.add_parser("update-kpi", help="[Plan 03] Update KPI values for a mission")
-    p_kpi.add_argument("--mission-id", required=True)
+    # --- update-kpi ---
+    p_kpi = sub.add_parser("update-kpi", help="Update KPI values for a mission and check lifecycle")
+    p_kpi.add_argument("--mission-id", required=True, help="Mission ID to update")
+    p_kpi.add_argument("--kpi-metric", help="Metric name to update (e.g. gsc_clicks)")
+    p_kpi.add_argument("--kpi-value", help="New current value for the metric")
+    p_kpi.add_argument("--check-stall", action="store_true",
+                       help="Run stall detection based on task progress")
 
     # --- adapt (Plan 04) ---
     p_adapt = sub.add_parser("adapt", help="[Plan 04] Adapt mission strategy when stalled")
@@ -786,7 +1033,7 @@ def main():
         "archive": archive_mission,
         "decompose": decompose_mission,
         "classify": classify_subcommand,
-        "update-kpi": _not_implemented,
+        "update-kpi": update_kpi,
         "adapt": _not_implemented,
         "next-task": next_task,
     }
