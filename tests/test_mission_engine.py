@@ -1,5 +1,22 @@
-"""Tests for mission_engine.py — covers MISS-01, MISS-03, MISS-04, MISS-07, MISS-10,
-MISS-02, MISS-05, MISS-11, TASK-01, TASK-02, TASK-05, TASK-06, TASK-07.
+"""Phase 2 Mission Engine tests.
+
+Requirement coverage:
+- MISS-01: TestMissionCreate (create produces valid mission file)
+- MISS-02: TestMissionDecompose (decompose creates tasks via Sonnet)
+- MISS-03: TestMissionPersistence (file survives restart simulation)
+- MISS-04: TestMissionStatus (status returns progress %)
+- MISS-05: TestNextTask (next-task returns unblocked task)
+- MISS-06: TestKPICompletion (all KPIs met -> COMPLETED)
+- MISS-07: TestMissionArchive (archive moves to archive/)
+- MISS-08: TestKPIAutoSelect (goal keywords -> KPI mapping)
+- MISS-09: TestStallDetection + TestAdapt (stall_count + replanning)
+- MISS-10: TestMultiMission (multiple missions, priority sort)
+- MISS-11: TestAmbiguityCheck (ambiguous goal -> clarification)
+- TASK-01: TestTaskClassify (one-time vs recurring)
+- TASK-02: TestCadenceExtraction (cron cadence stored)
+- TASK-05: TestClassifyAmbiguity (low confidence -> clarification)
+- TASK-06: TestComplexityRouting (complexity in task context)
+- TASK-07: TestDependencyOrder (tasks in dependency order)
 
 All tests use subprocess invocation (same pattern as test_task_manager_phase1.py)
 and MISSION_DIR env var for full isolation. LLM-dependent tests use direct import
