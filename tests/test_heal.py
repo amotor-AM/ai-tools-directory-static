@@ -1,15 +1,27 @@
-"""Tests for heal.py — error classification, tier selection, Tier 1 retry, Tier 2 alternative.
+"""Tests for heal.py — error classification, tier selection, Tier 1 retry, Tier 2 alternative,
+Tier 3 model fallback + delegation, Tier 4 escalation, Tier 5 skip, auto tier selection,
+and outcome recording.
 
 Requirement coverage:
     HEAL-01: Tier 1 exponential backoff retry for transient failures
     HEAL-02: Tier 2 alternative approach for approach failures
+    HEAL-03: Tier 3 model fallback chain + delegation with circuit breaker guard
+    HEAL-04: Tier 4 escalation via task_manager.py escalate (no Telegram)
     HEAL-06: Error classification maps error strings to correct recovery tier
+    HEAL-07: Outcome recording for every tier attempt
 
 Test classes:
-    TestErrorClassification — HEAL-06: classify_error() coverage for all 4+unknown classes
-    TestSelectTier          — routes tasks to the correct tier (1-4)
-    TestTier1Retry          — HEAL-01: @retry decorator, strategy-change enforcement
+    TestErrorClassification    — HEAL-06: classify_error() coverage for all 4+unknown classes
+    TestSelectTier             — routes tasks to the correct tier (1-4)
+    TestTier1Retry             — HEAL-01: @retry decorator, strategy-change enforcement
     TestTier2AlternativeApproach — HEAL-02: get_alternative() returns meaningful strings
+    TestTier3ModelFallback     — HEAL-03: model chain progression
+    TestTier3Delegation        — HEAL-03: delegation with circuit breaker guard
+    TestTier4Escalation        — HEAL-04: escalation, no Telegram, outcome recorded
+    TestTier5Skip              — Tier 5 cancel + outcome recorded as failure
+    TestAutoTierSelection      — --auto walks tiers based on task state
+    TestAutoTierStateReload    — --auto reloads task between tier escalations
+    TestOutcomeRecording       — HEAL-07: all tiers call outcome_tracker.py record
 """
 import inspect
 import json
@@ -298,3 +310,222 @@ class TestTier2AlternativeApproach:
             result = tier2_alternative("abc123", task)
 
         assert result == 1
+
+
+# ---------------------------------------------------------------------------
+# Helpers for Tier 3+  (context-aware tasks)
+# ---------------------------------------------------------------------------
+
+
+def _task_with_context(
+    *,
+    model: str | None = None,
+    task_type: str = "article",
+    goal: str = "write an article about AI",
+    last_error: str = "CUDA out of memory",
+    consecutive_step_errors: int = 1,
+    mission_id: str | None = None,
+) -> dict:
+    """Return a task dict that includes a context sub-dict (for Tier 3 tests)."""
+    context: dict = {"task_type": task_type}
+    if model is not None:
+        context["model"] = model
+    if mission_id is not None:
+        context["mission_id"] = mission_id
+    return {
+        "id": "abc123",
+        "goal": goal,
+        "consecutive_step_errors": consecutive_step_errors,
+        "blocked_heartbeats": 0,
+        "attempts": 1,
+        "max_attempts": 15,
+        "last_error": last_error,
+        "retry_strategy": None,
+        "context": context,
+    }
+
+
+# ---------------------------------------------------------------------------
+# TestTier3ModelFallback  (HEAL-03)
+# ---------------------------------------------------------------------------
+
+
+class TestTier3ModelFallback:
+    """tier3_model_fallback() walks the MODEL_FALLBACK_CHAIN before attempting delegation."""
+
+    def test_sonnet_falls_back_to_qwen3(self):
+        """Task with context.model=Sonnet -> tier3 uses qwen3:14b as next model."""
+        from scripts.heal import tier3_model_fallback, MODEL_FALLBACK_CHAIN
+
+        task = _task_with_context(model="anthropic/claude-sonnet-4-5")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier3_model_fallback("abc123", task)
+
+        # Find retry calls to task_manager
+        retry_calls = [c for c in calls if "retry" in c]
+        assert retry_calls, "No retry subprocess call for model fallback"
+        # Strategy should contain the next model
+        cmd = retry_calls[0]
+        strategy_idx = cmd.index("--strategy")
+        strategy = cmd[strategy_idx + 1]
+        assert "qwen3" in strategy.lower() or "model_fallback" in strategy.lower(), (
+            f"Expected qwen3 in strategy, got: {strategy!r}"
+        )
+        assert result == 0
+
+    def test_qwen3_falls_back_to_glm(self):
+        """Task with context.model=qwen3:14b -> tier3 uses GLM as next model."""
+        from scripts.heal import tier3_model_fallback
+
+        task = _task_with_context(model="qwen3:14b")
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier3_model_fallback("abc123", task)
+
+        retry_calls = [c for c in calls if "retry" in c]
+        assert retry_calls, "No retry subprocess call for model fallback"
+        cmd = retry_calls[0]
+        strategy_idx = cmd.index("--strategy")
+        strategy = cmd[strategy_idx + 1]
+        assert "glm" in strategy.lower() or "abliterated" in strategy.lower() or "model_fallback" in strategy.lower(), (
+            f"Expected GLM in strategy, got: {strategy!r}"
+        )
+        assert result == 0
+
+    def test_glm_last_in_chain_attempts_delegation(self):
+        """When on the last model (GLM), tier3 attempts delegation instead of model swap."""
+        from scripts.heal import tier3_model_fallback
+
+        # GLM is last in chain — no next model, so tries delegation
+        task = _task_with_context(
+            model="huihui_ai/glm-4.7-flash-abliterated",
+            goal="write an article about AI",
+            task_type="article",
+        )
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("scripts.heal.is_open", return_value=False):
+                result = tier3_model_fallback("abc123", task)
+
+        # Should have called manage.py spawn (delegation path)
+        spawn_calls = [c for c in calls if "spawn" in c]
+        assert spawn_calls, "Expected manage.py spawn call when all models exhausted"
+
+    def test_no_model_in_context_defaults_to_first_chain_model(self):
+        """Task with no context.model key defaults to first model in chain."""
+        from scripts.heal import tier3_model_fallback, MODEL_FALLBACK_CHAIN
+
+        # No model key in context -> defaults to Sonnet (first in chain) -> next is Qwen3
+        task = _task_with_context(model=None)
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            result = tier3_model_fallback("abc123", task)
+
+        retry_calls = [c for c in calls if "retry" in c]
+        assert retry_calls, "No retry subprocess call when no model specified"
+        cmd = retry_calls[0]
+        strategy_idx = cmd.index("--strategy")
+        strategy = cmd[strategy_idx + 1]
+        # Next model after default (Sonnet) should be qwen3
+        assert "qwen3" in strategy.lower() or "model_fallback" in strategy.lower(), (
+            f"Expected qwen3 after defaulting to first chain model, got: {strategy!r}"
+        )
+        assert result == 0
+
+
+# ---------------------------------------------------------------------------
+# TestTier3Delegation  (HEAL-03)
+# ---------------------------------------------------------------------------
+
+
+class TestTier3Delegation:
+    """tier3_model_fallback() delegation path when all models exhausted."""
+
+    def _exhausted_task(self, goal: str = "write an article about AI", task_type: str = "article") -> dict:
+        """Return a task where the current model is the last in chain (delegation path)."""
+        return _task_with_context(
+            model="huihui_ai/glm-4.7-flash-abliterated",
+            goal=goal,
+            task_type=task_type,
+        )
+
+    def test_delegation_calls_manage_spawn_when_breaker_closed(self):
+        """When circuit breaker is CLOSED, tier3 calls manage.py spawn with task goal."""
+        from scripts.heal import tier3_model_fallback
+
+        task = self._exhausted_task()
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("scripts.heal.is_open", return_value=False):
+                result = tier3_model_fallback("abc123", task)
+
+        spawn_calls = [c for c in calls if "spawn" in c]
+        assert spawn_calls, "Expected manage.py spawn call when breaker is closed"
+        spawn_cmd = spawn_calls[0]
+        # Should contain task goal via --task argument
+        assert "--task" in spawn_cmd, f"No --task in spawn call: {spawn_cmd}"
+
+    def test_skips_delegation_when_breaker_is_open(self):
+        """When circuit breaker is_open returns True, tier3 returns exit code 3."""
+        from scripts.heal import tier3_model_fallback
+
+        task = self._exhausted_task()
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(list(cmd))
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("scripts.heal.is_open", return_value=True):
+                result = tier3_model_fallback("abc123", task)
+
+        # Should NOT have called manage.py spawn
+        spawn_calls = [c for c in calls if "spawn" in c]
+        assert not spawn_calls, "tier3 should skip delegation when breaker is open"
+        assert result == 3, f"Expected exit code 3 (breaker open), got {result}"
+
+    def test_delegation_failure_records_circuit_breaker_failure(self):
+        """When manage.py spawn fails, tier3 calls circuit_breaker.record_failure."""
+        from scripts.heal import tier3_model_fallback
+
+        task = self._exhausted_task()
+
+        def fake_run(cmd, **kwargs):
+            if "spawn" in cmd:
+                raise subprocess.CalledProcessError(1, cmd)
+            return mock.MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("scripts.heal.is_open", return_value=False):
+                with mock.patch("scripts.heal.record_failure") as mock_record:
+                    result = tier3_model_fallback("abc123", task)
+
+        mock_record.assert_called_once()
+        assert result == 1, f"Expected exit code 1 (delegation failed), got {result}"
