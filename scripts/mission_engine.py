@@ -20,27 +20,46 @@ Usage:
   # Archive a completed mission
   mission_engine.py archive --mission-id <id>
 
-  # Stub subcommands (implemented in Plans 02-04)
+  # Decompose a mission into tasks via LLM (Sonnet + Qwen3)
   mission_engine.py decompose --mission-id <id>
-  mission_engine.py classify --mission-id <id>
-  mission_engine.py update-kpi --mission-id <id>
-  mission_engine.py adapt --mission-id <id>
+
+  # Classify a task description as one-time or recurring
+  mission_engine.py classify --description "post to Reddit daily"
+
+  # Get next task for a mission (dependency order)
   mission_engine.py next-task --mission-id <id>
+  mission_engine.py next-task --all-missions
 """
 
 import argparse
 import json
 import os
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field
 
 # file_lock.py lives in aria-taskmanager/scripts — add both paths
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, "/home/alex/.openclaw/workspace/skills/aria-taskmanager/scripts")
 
 from file_lock import FileLock  # noqa: E402
+
+# LLM client imports — imported at module level so tests can patch them.
+# These are optional at import time (no network calls on import).
+try:
+    from anthropic import Anthropic
+except ImportError:
+    Anthropic = None  # type: ignore
+
+try:
+    import ollama
+except ImportError:
+    ollama = None  # type: ignore
 
 # ---------------------------------------------------------------------------
 # Directory configuration — MISSION_DIR env var enables test isolation
@@ -54,12 +73,54 @@ LEDGER_PATH = MISSIONS_DIR / "ledger.json"
 ARCHIVE_DIR = MISSIONS_DIR / "archive"
 OUTCOMES_PATH = MISSIONS_DIR / "archive" / "outcomes.jsonl"
 
+# Task state directory for next-task (reads task files written by task_manager.py)
+TASK_STATE_DIR = Path(os.environ.get(
+    "ARIA_TASK_DIR",
+    "/home/alex/.openclaw/workspace/memory/tasks/state"
+))
+
+# Path to task_manager.py — resolved at runtime for subprocess calls
+TM_PATH = Path("/home/alex/.openclaw/workspace/skills/aria-taskmanager/scripts/task_manager.py")
+
 # Mission status values
 VALID_STATUSES = {"INBOX", "ACTIVE", "ADAPTING", "STALLED", "COMPLETED"}
 ACTIVE_STATUSES = {"INBOX", "ACTIVE", "ADAPTING", "STALLED"}
 
 # Task statuses considered "done" for progress calculation
 DONE_TASK_STATUSES = {"DONE", "COMPLETED", "CANCELLED"}
+
+# Task statuses considered "in progress" (skip for next-task selection)
+IN_PROGRESS_STATUSES = {"RUNNING", "DELEGATED", "ESCALATED"}
+
+# Task statuses eligible for next-task selection
+ELIGIBLE_STATUSES = {"CREATED", "BLOCKED", "RETRYING"}
+
+
+# ---------------------------------------------------------------------------
+# Pydantic models for LLM-structured outputs
+# ---------------------------------------------------------------------------
+
+class TaskClassification(BaseModel):
+    """Classification of a task as one-time or recurring."""
+    task_type: Literal["one-time", "recurring"]
+    confidence: float = Field(ge=0.0, le=1.0)
+    cadence: Optional[str] = None  # cron expression if recurring
+    reasoning: str
+
+
+class AmbiguityCheck(BaseModel):
+    """Assessment of whether a goal is too ambiguous to act on."""
+    is_ambiguous: bool
+    missing_info: list[str] = Field(default_factory=list)
+    clarification_question: Optional[str] = None
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class SubtaskEnrichment(BaseModel):
+    """Complexity and GPU requirement assessment for a subtask."""
+    complexity: int = Field(ge=1, le=5)  # 1=trivial, 5=very complex
+    requires_gpu: bool = False
+    reasoning: str
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +238,87 @@ def _compute_progress(mission: dict) -> int:
         return 0
     done = sum(1 for t in tasks if t.get("status", "") in DONE_TASK_STATUSES)
     return int(done / len(tasks) * 100)
+
+
+# ---------------------------------------------------------------------------
+# LLM helper functions
+# ---------------------------------------------------------------------------
+
+def classify_task(description: str) -> TaskClassification:
+    """Classify a task description as one-time or recurring using Qwen3.
+
+    Args:
+        description: Natural language task description.
+
+    Returns:
+        TaskClassification with task_type, confidence, cadence, reasoning.
+    """
+    prompt = (
+        f"Classify this task as 'one-time' or 'recurring'. "
+        f"A recurring task is done on a regular schedule (daily, weekly, etc.) and needs a cron expression. "
+        f"A one-time task is done once and then complete.\n\n"
+        f"Task: {description}\n\n"
+        f"Return JSON matching the schema exactly."
+    )
+
+    response = ollama.chat(
+        model="huihui_ai/qwen3-abliterated:14b",
+        format=TaskClassification.model_json_schema(),
+        messages=[{"role": "user", "content": prompt}],
+        options={"temperature": 0},
+    )
+
+    return TaskClassification.model_validate_json(response.message.content)
+
+
+def check_ambiguity(goal: str) -> AmbiguityCheck:
+    """Check if a goal is too ambiguous to act on using Sonnet.
+
+    Args:
+        goal: High-level goal string.
+
+    Returns:
+        AmbiguityCheck with is_ambiguous, missing_info, clarification_question, confidence.
+    """
+    client = Anthropic()
+
+    prompt = (
+        "Evaluate if this goal is clear enough to act on. "
+        "A goal is ambiguous ONLY if 2+ fundamental parameters (who/what/how/where) are genuinely "
+        "undefined and cannot be reasonably inferred. "
+        "Goals like 'grow SEO traffic' or 'write 5 articles' are CLEAR — Aria knows her domains. "
+        "Return is_ambiguous=true ONLY for goals like 'do something about the website' or 'make money somehow'.\n\n"
+        f"Goal: {goal}\n\n"
+        "Return JSON matching the schema exactly."
+    )
+
+    result = client.beta.messages.parse(
+        model="claude-sonnet-4-5",
+        max_tokens=512,
+        output_format=AmbiguityCheck,
+        messages=[{"role": "user", "content": prompt}],
+    )
+
+    return result.parsed
+
+
+def _enrich_subtask(subtask: str) -> SubtaskEnrichment:
+    """Get complexity score and GPU requirement for a subtask using Qwen3."""
+    prompt = (
+        f"Assess the complexity (1=trivial, 5=very complex) and whether this task requires GPU resources "
+        f"(e.g., image generation, video processing, model training).\n\n"
+        f"Task: {subtask}\n\n"
+        f"Return JSON matching the schema exactly."
+    )
+
+    response = ollama.chat(
+        model="huihui_ai/qwen3-abliterated:14b",
+        format=SubtaskEnrichment.model_json_schema(),
+        messages=[{"role": "user", "content": prompt}],
+        options={"temperature": 0},
+    )
+
+    return SubtaskEnrichment.model_validate_json(response.message.content)
 
 
 # ---------------------------------------------------------------------------
@@ -317,13 +459,265 @@ def archive_mission(args):
     print(f"  File: {dest_path}")
 
 
-# ---------------------------------------------------------------------------
-# Stub subcommands (implemented in Plans 02-04)
-# ---------------------------------------------------------------------------
+def decompose_mission(args):
+    """Decompose a mission into ordered subtasks via Sonnet + Qwen3 two-step pattern.
 
-def _not_implemented(args):
-    print("NOT_IMPLEMENTED")
-    sys.exit(1)
+    Step 0: Check goal ambiguity via Sonnet AmbiguityCheck.
+    Step 1: Call Sonnet to decompose goal -> MissionDecompositionOutput.
+    Step 2: For each subtask, classify (Qwen3) and enrich (Qwen3).
+    Step 3: Create task_manager.py entries via subprocess.
+    Step 4: Update mission JSON with tasks, kpis, status=ACTIVE.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from output_schema import MissionDecompositionOutput
+
+    mission, path = load_mission(args.mission_id)
+
+    if mission["status"] != "INBOX":
+        print(f"ERROR: Mission '{args.mission_id}' is not in INBOX status (current: {mission['status']})",
+              file=sys.stderr)
+        sys.exit(1)
+
+    client = Anthropic()  # module-level import
+
+    # --- Step 0: Ambiguity check ---
+    ambiguity_result = client.beta.messages.parse(
+        model="claude-sonnet-4-5",
+        max_tokens=512,
+        output_format=AmbiguityCheck,
+        messages=[{
+            "role": "user",
+            "content": (
+                "Evaluate if this goal is clear enough to act on. "
+                "A goal is ambiguous ONLY if 2+ fundamental parameters (who/what/how/where) are genuinely "
+                "undefined and cannot be reasonably inferred. "
+                "Goals like 'grow SEO traffic' or 'write 5 articles' are CLEAR — Aria knows her domains. "
+                "Return is_ambiguous=true ONLY for goals like 'do something about the website' or 'make money somehow'.\n\n"
+                f"Goal: {mission['goal']}\n\n"
+                "Return JSON matching the schema exactly."
+            ),
+        }],
+    )
+    ambiguity = ambiguity_result.parsed
+
+    if ambiguity.is_ambiguous and ambiguity.confidence > 0.7:
+        question = ambiguity.clarification_question or "Please clarify the goal."
+        print(f"CLARIFICATION_NEEDED: {question}")
+        sys.exit(3)
+
+    # --- Step 1: Sonnet decomposition ---
+    decompose_result = client.beta.messages.parse(
+        model="claude-sonnet-4-5",
+        max_tokens=2048,
+        output_format=MissionDecompositionOutput,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Decompose this mission into ordered subtasks. Return subtasks in dependency order "
+                f"(earlier subtasks must be done before later ones). Each subtask should be a clear, "
+                f"actionable goal statement. Include 2-5 measurable KPIs.\n\n"
+                f"Mission ID: {mission['id']}\n"
+                f"Goal: {mission['goal']}\n\n"
+                f"Return JSON matching the schema exactly."
+            ),
+        }],
+    )
+    decomposition = decompose_result.parsed
+
+    # --- Step 2: Classify and enrich each subtask ---
+    task_entries = []
+    for subtask_str in decomposition.subtasks:
+        classification = classify_task(subtask_str)
+        enrichment = _enrich_subtask(subtask_str)
+
+        # Build subprocess command for task_manager.py
+        context_obj = {
+            "complexity": enrichment.complexity,
+            "mission_goal": mission["original_goal"],
+        }
+        cmd = [
+            sys.executable,
+            str(TM_PATH),
+            "create",
+            "--goal", subtask_str,
+            "--mission-id", args.mission_id,
+            "--source", "mission-subtask",
+            "--priority", str(mission.get("priority", 3)),
+            "--context", json.dumps(context_obj),
+        ]
+        if enrichment.requires_gpu:
+            cmd.append("--requires-gpu")
+
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+
+        if proc.returncode == 2:
+            # DUPLICATE_REJECTED — task already exists, note and continue
+            print(f"  NOTE: Subtask already exists (duplicate): {subtask_str[:60]}")
+            task_id = None
+            # Try to extract task ID from stdout if available
+            for line in proc.stdout.splitlines():
+                if line.startswith("CREATED:"):
+                    token = line.split(":", 1)[1].strip()
+                    task_id = token.split("_", 1)[1] if "_" in token else token
+                    break
+        elif proc.returncode != 0:
+            print(f"  WARNING: task_manager.py failed (exit {proc.returncode}): {proc.stderr.strip()}")
+            task_id = None
+        else:
+            # Extract task ID from "CREATED: task_<id>" line
+            task_id = None
+            for line in proc.stdout.splitlines():
+                if line.startswith("CREATED:"):
+                    token = line.split(":", 1)[1].strip()
+                    task_id = token.split("_", 1)[1] if "_" in token else token
+                    break
+
+        task_entries.append({
+            "task_id": task_id or short_id(),
+            "goal": subtask_str,
+            "type": classification.task_type,
+            "cadence": classification.cadence,
+            "status": "CREATED",
+            "requires_gpu": enrichment.requires_gpu,
+        })
+
+    # --- Step 3: Update mission JSON ---
+    mission["tasks"] = task_entries
+    mission["kpis"] = [
+        {"metric": kpi, "target": "TBD", "current": 0, "met": False}
+        for kpi in decomposition.kpis
+    ]
+    mission["strategy"] = mission.get("goal", "")
+    mission["status"] = "ACTIVE"
+    mission["updated_at"] = now_iso()
+
+    save_mission(mission, path)
+    update_ledger(args.mission_id, mission["goal"], "ACTIVE", mission.get("priority", 3))
+
+    print(f"MISSION_DECOMPOSED: mission_{args.mission_id}")
+    print(f"  Tasks: {len(task_entries)}")
+    print(f"  KPIs: {len(mission['kpis'])}")
+
+
+def classify_subcommand(args):
+    """Standalone classify subcommand — classify a task description.
+
+    Prints TYPE, CONFIDENCE, CADENCE, REASONING. If confidence < 0.6,
+    prints NEEDS_CLARIFICATION instead.
+    """
+    classification = classify_task(args.description)
+
+    if classification.confidence < 0.6:
+        print(
+            f"NEEDS_CLARIFICATION: Low confidence ({classification.confidence:.2f}). "
+            f"What did you mean by: {args.description}?"
+        )
+    else:
+        print(f"TYPE: {classification.task_type}")
+        print(f"CONFIDENCE: {classification.confidence:.2f}")
+        print(f"CADENCE: {classification.cadence or 'N/A'}")
+        print(f"REASONING: {classification.reasoning}")
+
+
+def next_task(args):
+    """Return the next eligible task for a mission (or all active missions).
+
+    Tasks are returned in dependency order (the order they were added to the
+    mission tasks array, which matches the Sonnet decomposition order).
+
+    Skips tasks that are DONE, COMPLETED, CANCELLED (finished) or
+    RUNNING, DELEGATED, ESCALATED (already in progress).
+
+    With --all-missions: iterates all active missions by priority (ascending),
+    returning one eligible task per mission, capped at 3 total.
+    """
+    if getattr(args, "all_missions", False):
+        _next_task_all_missions()
+        return
+
+    if not getattr(args, "mission_id", None):
+        print("ERROR: --mission-id or --all-missions required", file=sys.stderr)
+        sys.exit(1)
+
+    _next_task_for_mission(args.mission_id)
+
+
+def _next_task_for_mission(mission_id: str) -> bool:
+    """Find and print the next eligible task for a single mission.
+
+    Returns True if a task was found, False if none available.
+    """
+    mission, _ = load_mission(mission_id)
+    tasks = mission.get("tasks", [])
+
+    for task_entry in tasks:
+        task_id = task_entry.get("task_id")
+        if not task_id:
+            continue
+
+        # Read task file from task_manager.py state dir to get live status
+        task_file = TASK_STATE_DIR / f"task_{task_id}.json"
+        if not task_file.exists():
+            # Task file not found — treat as CREATED (not yet recorded by task_manager)
+            task_status = "CREATED"
+        else:
+            try:
+                with open(task_file) as f:
+                    task_data = json.load(f)
+                task_status = task_data.get("status", "CREATED")
+            except (json.JSONDecodeError, OSError):
+                task_status = "CREATED"
+
+        # Skip finished tasks
+        if task_status in DONE_TASK_STATUSES:
+            continue
+
+        # Skip tasks already in progress
+        if task_status in IN_PROGRESS_STATUSES:
+            continue
+
+        # Eligible — return this task
+        context_str = ""
+        if task_file.exists():
+            try:
+                with open(task_file) as f:
+                    task_data = json.load(f)
+                ctx = task_data.get("context", {})
+                context_str = f"complexity={ctx.get('complexity', '?')}, mission_goal={mission.get('goal', '')[:60]}"
+            except (json.JSONDecodeError, OSError):
+                context_str = f"mission_goal={mission.get('goal', '')[:60]}"
+        else:
+            context_str = f"mission_goal={mission.get('goal', '')[:60]}"
+
+        print(f"NEXT_TASK: task_{task_id}")
+        print(f"  Goal: {task_entry.get('goal', '')}")
+        print(f"  Type: {task_entry.get('type', 'one-time')}")
+        print(f"  Context: {context_str}")
+        return True
+
+    print(f"NO_TASKS_AVAILABLE: All tasks complete or in progress for mission_{mission_id}")
+    return False
+
+
+def _next_task_all_missions():
+    """Find next eligible tasks across all active missions, ordered by priority.
+
+    Returns up to 3 tasks (one per mission, highest priority first).
+    """
+    ledger = load_ledger()
+    active = [e for e in ledger["missions"] if e.get("status") in ACTIVE_STATUSES]
+    active.sort(key=lambda e: e.get("priority", 3))
+
+    if not active:
+        print("NO_ACTIVE_MISSIONS")
+        return
+
+    found = 0
+    for entry in active:
+        if found >= 3:
+            break
+        if _next_task_for_mission(entry["id"]):
+            found += 1
 
 
 # ---------------------------------------------------------------------------
@@ -354,36 +748,47 @@ def main():
     p_archive = sub.add_parser("archive", help="Archive a completed mission")
     p_archive.add_argument("--mission-id", required=True, help="Mission ID to archive")
 
-    # --- stubs (Plans 02-04) ---
-    p_decompose = sub.add_parser("decompose", help="[Plan 02] Decompose mission into tasks via LLM")
-    p_decompose.add_argument("--mission-id", required=True)
+    # --- decompose ---
+    p_decompose = sub.add_parser("decompose", help="Decompose mission into tasks via LLM (Sonnet + Qwen3)")
+    p_decompose.add_argument("--mission-id", required=True, help="Mission ID to decompose")
 
-    p_classify = sub.add_parser("classify", help="[Plan 02] Classify tasks as one-time or recurring")
-    p_classify.add_argument("--mission-id", required=True)
+    # --- classify ---
+    p_classify = sub.add_parser("classify", help="Classify a task description as one-time or recurring")
+    p_classify.add_argument("--description", required=True, help="Task description to classify")
 
+    # --- update-kpi (Plan 03) ---
     p_kpi = sub.add_parser("update-kpi", help="[Plan 03] Update KPI values for a mission")
     p_kpi.add_argument("--mission-id", required=True)
 
+    # --- adapt (Plan 04) ---
     p_adapt = sub.add_parser("adapt", help="[Plan 04] Adapt mission strategy when stalled")
     p_adapt.add_argument("--mission-id", required=True)
 
-    p_next = sub.add_parser("next-task", help="[Plan 04] Get next task for a mission")
-    p_next.add_argument("--mission-id", required=True)
+    # --- next-task ---
+    p_next = sub.add_parser("next-task", help="Get next eligible task for a mission (dependency order)")
+    next_group = p_next.add_mutually_exclusive_group()
+    next_group.add_argument("--mission-id", help="Mission ID to get next task for")
+    next_group.add_argument("--all-missions", action="store_true",
+                            help="Get next task across all active missions (up to 3, by priority)")
 
     args = parser.parse_args()
     if not args.command:
         parser.print_help()
         sys.exit(1)
 
+    def _not_implemented(args):
+        print("NOT_IMPLEMENTED")
+        sys.exit(1)
+
     commands = {
         "create": create_mission,
         "status": mission_status,
         "archive": archive_mission,
-        "decompose": _not_implemented,
-        "classify": _not_implemented,
+        "decompose": decompose_mission,
+        "classify": classify_subcommand,
         "update-kpi": _not_implemented,
         "adapt": _not_implemented,
-        "next-task": _not_implemented,
+        "next-task": next_task,
     }
     commands[args.command](args)
 
