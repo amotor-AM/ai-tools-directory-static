@@ -1730,3 +1730,328 @@ class TestRecurringReCreation:
             # Subprocess should NOT have been called (not due yet)
             assert not mock_sub.run.called, \
                 "Expected no subprocess.run for not-yet-due recurring task"
+
+
+# --- MISS-09 (adapt): Strategy adaptation via Sonnet ---
+
+def _make_mock_adaptation(revised_strategy="New strategy", new_subtasks=None, cancel_ids=None):
+    """Return MagicMock simulating client.beta.messages.parse() for AdaptationOutput."""
+    mock_result = MagicMock()
+    mock_result.parsed = MagicMock()
+    mock_result.parsed.revised_strategy = revised_strategy
+    mock_result.parsed.new_subtasks = new_subtasks or ["New subtask A", "New subtask B"]
+    mock_result.parsed.cancel_task_ids = cancel_ids or []
+    mock_result.parsed.reasoning = "Mission stalled; new approach needed."
+    return mock_result
+
+
+class TestAdapt:
+    def test_adapt_updates_strategy_field(self, mission_dir, task_state_dir):
+        """adapt sets mission strategy to revised_strategy from Sonnet."""
+        _create_mission_file_with_kpis(
+            mission_dir, "ada00001",
+            goal="Grow traffic",
+            status="STALLED",
+            stall_count=3,
+            strategy="Old strategy",
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.return_value = _make_mock_adaptation(
+            revised_strategy="New focused strategy"
+        )
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama, \
+             patch("mission_engine.subprocess") as mock_sub:
+            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada001\n")
+
+            args = MagicMock()
+            args.mission_id = "ada00001"
+            import io
+            from contextlib import redirect_stdout
+            with redirect_stdout(io.StringIO()):
+                mission_engine.adapt_mission(args)
+
+        mission, _ = mission_engine.load_mission("ada00001")
+        assert mission["strategy"] == "New focused strategy", \
+            f"Expected 'New focused strategy', got: {mission['strategy']}"
+
+    def test_adapt_resets_stall_count(self, mission_dir, task_state_dir):
+        """adapt resets stall_count to 0."""
+        _create_mission_file_with_kpis(
+            mission_dir, "ada00002",
+            goal="Grow revenue",
+            status="STALLED",
+            stall_count=4,
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.return_value = _make_mock_adaptation()
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama, \
+             patch("mission_engine.subprocess") as mock_sub:
+            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada002\n")
+
+            args = MagicMock()
+            args.mission_id = "ada00002"
+            import io
+            from contextlib import redirect_stdout
+            with redirect_stdout(io.StringIO()):
+                mission_engine.adapt_mission(args)
+
+        mission, _ = mission_engine.load_mission("ada00002")
+        assert mission["stall_count"] == 0, f"Expected stall_count=0, got: {mission['stall_count']}"
+
+    def test_adapt_sets_status_to_active(self, mission_dir, task_state_dir):
+        """adapt transitions mission status from STALLED to ACTIVE."""
+        _create_mission_file_with_kpis(
+            mission_dir, "ada00003",
+            goal="Grow followers",
+            status="STALLED",
+            stall_count=3,
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.return_value = _make_mock_adaptation()
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama, \
+             patch("mission_engine.subprocess") as mock_sub:
+            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada003\n")
+
+            args = MagicMock()
+            args.mission_id = "ada00003"
+            import io
+            from contextlib import redirect_stdout
+            with redirect_stdout(io.StringIO()):
+                mission_engine.adapt_mission(args)
+
+        mission, _ = mission_engine.load_mission("ada00003")
+        assert mission["status"] == "ACTIVE", f"Expected ACTIVE, got: {mission['status']}"
+
+    def test_adapt_adds_new_tasks_to_mission(self, mission_dir, task_state_dir):
+        """adapt adds new tasks from Sonnet new_subtasks to mission tasks array."""
+        _create_mission_file_with_kpis(
+            mission_dir, "ada00004",
+            goal="Grow books published",
+            status="STALLED",
+            stall_count=3,
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.return_value = _make_mock_adaptation(
+            new_subtasks=["Write outline", "Draft chapter 1"]
+        )
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama, \
+             patch("mission_engine.subprocess") as mock_sub:
+            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada004\n")
+
+            args = MagicMock()
+            args.mission_id = "ada00004"
+            import io
+            from contextlib import redirect_stdout
+            with redirect_stdout(io.StringIO()):
+                mission_engine.adapt_mission(args)
+
+        mission, _ = mission_engine.load_mission("ada00004")
+        assert len(mission["tasks"]) >= 2, \
+            f"Expected at least 2 new tasks, got: {len(mission['tasks'])}"
+
+    def test_adapt_original_goal_unchanged(self, mission_dir, task_state_dir):
+        """adapt never modifies original_goal field."""
+        original = "Grow traffic through SEO"
+        _create_mission_file_with_kpis(
+            mission_dir, "ada00005",
+            goal=original,
+            status="STALLED",
+            stall_count=3,
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.return_value = _make_mock_adaptation()
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama, \
+             patch("mission_engine.subprocess") as mock_sub:
+            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada005\n")
+
+            args = MagicMock()
+            args.mission_id = "ada00005"
+            import io
+            from contextlib import redirect_stdout
+            with redirect_stdout(io.StringIO()):
+                mission_engine.adapt_mission(args)
+
+        mission, _ = mission_engine.load_mission("ada00005")
+        assert mission["original_goal"] == original, \
+            f"original_goal mutated: expected '{original}', got '{mission['original_goal']}'"
+
+    def test_adapt_prints_mission_adapted(self, mission_dir, task_state_dir):
+        """adapt prints MISSION_ADAPTED: with mission ID."""
+        _create_mission_file_with_kpis(
+            mission_dir, "ada00006",
+            goal="Grow social audience",
+            status="STALLED",
+            stall_count=3,
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.return_value = _make_mock_adaptation()
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama, \
+             patch("mission_engine.subprocess") as mock_sub:
+            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_ada006\n")
+
+            args = MagicMock()
+            args.mission_id = "ada00006"
+            import io
+            from contextlib import redirect_stdout
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                mission_engine.adapt_mission(args)
+
+        assert "MISSION_ADAPTED" in buf.getvalue(), \
+            f"Expected MISSION_ADAPTED in output: {buf.getvalue()}"
+
+
+class TestAdaptReanchor:
+    def test_adapt_prompt_contains_original_goal(self, mission_dir, task_state_dir):
+        """Sonnet prompt passed to beta.messages.parse includes original_goal for re-anchoring."""
+        original = "Grow organic SEO traffic to 10K visits"
+        _create_mission_file_with_kpis(
+            mission_dir, "anc00001",
+            goal=original,
+            status="STALLED",
+            stall_count=3,
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.return_value = _make_mock_adaptation()
+        captured_calls = []
+
+        def capture_parse(*a, **kw):
+            captured_calls.append(kw)
+            return _make_mock_adaptation()
+
+        mock_client.beta.messages.parse.side_effect = capture_parse
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama, \
+             patch("mission_engine.subprocess") as mock_sub:
+            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_anc001\n")
+
+            args = MagicMock()
+            args.mission_id = "anc00001"
+            import io
+            from contextlib import redirect_stdout
+            with redirect_stdout(io.StringIO()):
+                mission_engine.adapt_mission(args)
+
+        assert len(captured_calls) > 0, "No calls made to client.beta.messages.parse"
+        # The prompt should contain the original goal for re-anchoring
+        found_goal = False
+        for call in captured_calls:
+            messages = call.get("messages", [])
+            for msg in messages:
+                content = msg.get("content", "")
+                if original in content:
+                    found_goal = True
+                    break
+        assert found_goal, \
+            f"original_goal '{original}' not found in Sonnet prompt. Calls: {captured_calls}"
+
+    def test_adapt_prompt_contains_reanchor_directive(self, mission_dir, task_state_dir):
+        """Sonnet prompt explicitly tells model to re-anchor on original goal (anti-drift)."""
+        _create_mission_file_with_kpis(
+            mission_dir, "anc00002",
+            goal="Grow content articles",
+            status="STALLED",
+            stall_count=3,
+        )
+        import mission_engine
+        mission_engine.MISSIONS_DIR = mission_dir
+        mission_engine.LEDGER_PATH = mission_dir / "ledger.json"
+        mission_engine.ARCHIVE_DIR = mission_dir / "archive"
+        mission_engine.TASK_STATE_DIR = task_state_dir
+
+        captured_calls = []
+
+        def capture_parse(*a, **kw):
+            captured_calls.append(kw)
+            return _make_mock_adaptation()
+
+        mock_client = MagicMock()
+        mock_client.beta.messages.parse.side_effect = capture_parse
+
+        with patch("mission_engine.Anthropic", return_value=mock_client), \
+             patch("mission_engine.ollama") as mock_ollama, \
+             patch("mission_engine.subprocess") as mock_sub:
+            mock_ollama.chat.return_value = _make_mock_classification("one-time", 0.9)
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="CREATED: task_anc002\n")
+
+            args = MagicMock()
+            args.mission_id = "anc00002"
+            import io
+            from contextlib import redirect_stdout
+            with redirect_stdout(io.StringIO()):
+                mission_engine.adapt_mission(args)
+
+        assert len(captured_calls) > 0, "No calls made to client.beta.messages.parse"
+        # Prompt should include re-anchor language
+        found_reanchor = False
+        for call in captured_calls:
+            messages = call.get("messages", [])
+            for msg in messages:
+                content = msg.get("content", "").lower()
+                if "re-anchor" in content or "original goal" in content or "do not drift" in content:
+                    found_reanchor = True
+                    break
+        assert found_reanchor, \
+            f"Re-anchor directive not found in prompt. Calls: {captured_calls}"
