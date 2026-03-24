@@ -15,6 +15,7 @@ from output_schema import (
     QualityGateResult,
     HumanMessage,
     DailyBriefing,
+    AlertMessage,
     OUTPUT_SCHEMAS,
 )
 from pydantic import ValidationError
@@ -216,11 +217,11 @@ class TestDailyBriefing:
 # --- Schema registry ---
 
 class TestOutputSchemas:
-    def test_registry_has_four_entries(self):
-        assert len(OUTPUT_SCHEMAS) == 4
+    def test_registry_has_five_entries(self):
+        assert len(OUTPUT_SCHEMAS) == 5
 
     def test_registry_keys(self):
-        expected = {"article_published", "book_uploaded", "mission_decomposed", "task_complete"}
+        expected = {"alert", "article_published", "book_uploaded", "mission_decomposed", "task_complete"}
         assert set(OUTPUT_SCHEMAS.keys()) == expected
 
     def test_registry_values_are_classes(self):
@@ -234,3 +235,101 @@ class TestOutputSchemas:
     def test_registry_task_complete_maps_to_correct_class(self):
         cls = OUTPUT_SCHEMAS["task_complete"]
         assert cls is TaskCompleteOutput
+
+    def test_registry_alert_maps_to_correct_class(self):
+        assert OUTPUT_SCHEMAS["alert"] is AlertMessage
+
+
+# --- OUTP-05: AlertMessage schema ---
+
+class TestAlertMessage:
+    def test_valid_alert(self):
+        a = AlertMessage(
+            text="Provide Stripe API key",
+            category="credentials_needed",
+            task_id="t123",
+            tried=["checked keyring"],
+        )
+        assert a.text == "Provide Stripe API key"
+        assert a.category == "credentials_needed"
+        assert a.task_id == "t123"
+        assert a.tried == ["checked keyring"]
+
+    def test_text_over_500_rejected(self):
+        with pytest.raises(ValidationError):
+            AlertMessage(text="x" * 501, category="blocker_critical")
+
+    def test_text_at_500_accepted(self):
+        a = AlertMessage(text="x" * 500, category="money_needed")
+        assert len(a.text) == 500
+
+    def test_missing_category_rejected(self):
+        with pytest.raises(ValidationError):
+            AlertMessage(text="hi")
+
+    def test_invalid_category_rejected(self):
+        with pytest.raises(ValidationError):
+            AlertMessage(text="hi", category="info")
+
+    def test_all_valid_categories(self):
+        for category in ("credentials_needed", "money_needed", "blocker_critical"):
+            a = AlertMessage(text="test alert", category=category)
+            assert a.category == category
+
+    def test_tried_defaults_empty(self):
+        a = AlertMessage(text="hi", category="money_needed")
+        assert a.tried == []
+
+    def test_task_id_optional(self):
+        a = AlertMessage(text="hi", category="money_needed")
+        assert a.task_id is None
+
+
+# --- OUTP-06/07: DailyBriefing extended fields ---
+
+class TestDailyBriefingExtended:
+    def test_action_items_accepted(self):
+        b = DailyBriefing(action_items=["Provide API key", "Approve spend"])
+        assert len(b.action_items) == 2
+
+    def test_action_items_over_3_rejected(self):
+        with pytest.raises(ValidationError):
+            DailyBriefing(action_items=["a", "b", "c", "d"])
+
+    def test_action_item_over_80_chars_rejected(self):
+        with pytest.raises(ValidationError):
+            DailyBriefing(action_items=["x" * 81])
+
+    def test_action_item_at_80_chars_accepted(self):
+        b = DailyBriefing(action_items=["x" * 80])
+        assert len(b.action_items[0]) == 80
+
+    def test_delta_summary_accepted(self):
+        b = DailyBriefing(delta_summary="+3 tasks completed today")
+        assert b.delta_summary == "+3 tasks completed today"
+
+    def test_delta_summary_over_120_rejected(self):
+        with pytest.raises(ValidationError):
+            DailyBriefing(delta_summary="x" * 121)
+
+    def test_delta_summary_at_120_accepted(self):
+        b = DailyBriefing(delta_summary="x" * 120)
+        assert len(b.delta_summary) == 120
+
+    def test_empty_briefing_still_accepted(self):
+        b = DailyBriefing()
+        assert b.action_items == []
+        assert b.delta_summary is None
+
+    def test_full_briefing_with_all_fields(self):
+        b = DailyBriefing(
+            done=["Published article on SEO", "Ran reddit warm-up"],
+            active=["Writing book chapter 3"],
+            tomorrow=["Research keywords"],
+            flag="Revenue dipped 10%",
+            action_items=["Provide Stripe key", "Approve $20 spend"],
+            delta_summary="+2 tasks done, 1 mission stalled",
+        )
+        assert len(b.done) == 2
+        assert len(b.action_items) == 2
+        assert b.delta_summary == "+2 tasks done, 1 mission stalled"
