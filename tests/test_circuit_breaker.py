@@ -98,19 +98,35 @@ class TestHalfOpen:
     """Verify the half-open transition after reset_timeout and probe behaviour."""
 
     def test_half_open_after_timeout(self, heal_test_dir):
-        """After opening, setting opened_at in the past exposes half-open state."""
+        """After timeout elapses, a call attempt passes through HALF_OPEN state.
+
+        pybreaker transitions OPEN -> HALF_OPEN -> CLOSED (on success) or
+        OPEN -> HALF_OPEN -> OPEN (on failure).  We verify the HALF_OPEN
+        transition was observed by using a listener that records state changes.
+        """
         key = "webagent:article"
         storage = cb.CircuitFileStorage(key)
 
-        # Manually set state to OPEN with an expired opened_at
+        # Set state to OPEN with an expired opened_at
         storage.state = pybreaker.STATE_OPEN
-        # opened_at is reset_timeout + 1 seconds in the past
         reset_timeout = cb.BREAKER_TIMEOUTS.get("webagent", cb.BREAKER_TIMEOUTS["default"])
         storage.opened_at = datetime.now(timezone.utc) - timedelta(seconds=reset_timeout + 1)
 
-        # A fresh get_breaker call should now see HALF_OPEN
+        # Track state changes via a listener
+        observed_states: list[str] = []
+
+        class StateRecorder(pybreaker.CircuitBreakerListener):
+            def state_change(self, cb_obj, old_state, new_state):  # type: ignore[override]
+                observed_states.append(new_state.name if hasattr(new_state, "name") else str(new_state))
+
         breaker = cb.get_breaker("webagent", "article")
-        assert breaker.current_state == pybreaker.STATE_HALF_OPEN
+        breaker.add_listener(StateRecorder())
+
+        # Successful probe: OPEN -> HALF_OPEN -> CLOSED
+        breaker.call(lambda: True)
+
+        # HALF_OPEN should have been an intermediate state
+        assert pybreaker.STATE_HALF_OPEN in observed_states
 
     def test_success_closes_half_open_breaker(self, heal_test_dir):
         """record_success on a half-open breaker closes it."""
