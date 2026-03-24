@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "patterns": [
+    {"pattern": "delete.*all", "reason": "mass deletion blocked", "severity": "critical"},
+    {"pattern": "email.*blast", "reason": "bulk email blocked without review", "severity": "critical"},
+    {"pattern": "payment|purchase|buy|charge", "reason": "financial action requires Alex approval", "severity": "critical"},
+    {"pattern": "email.*[5-9][0-9][0-9]|email.*[0-9]{4,}", "reason": "email blast >500 blocked", "severity": "high"}
+  ]
+}
