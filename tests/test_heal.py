@@ -29,6 +29,9 @@ import subprocess
 import sys
 from unittest import mock
 
+sys.path.insert(0, "/home/alex/.openclaw/workspace/scripts")
+sys.path.insert(0, "/home/alex/.openclaw/workspace/skills/aria-taskmanager/scripts")
+
 import pytest
 
 
@@ -90,7 +93,7 @@ class TestErrorClassification:
         ("unknown weird error xyz", "unknown"),
     ])
     def test_classify(self, error_str, expected):
-        from scripts.heal import classify_error
+        from heal import classify_error
         result = classify_error(error_str)
         assert result == expected, (
             f"classify_error({error_str!r}) returned {result!r}, expected {expected!r}"
@@ -106,32 +109,32 @@ class TestSelectTier:
     """select_tier() routes tasks to the correct recovery tier."""
 
     def test_transient_low_errors_goes_tier1(self):
-        from scripts.heal import select_tier
+        from heal import select_tier
         task = _task(consecutive_step_errors=1, last_error="timeout after 30s")
         assert select_tier(task) == 1
 
     def test_approach_error_goes_tier2(self):
-        from scripts.heal import select_tier
+        from heal import select_tier
         task = _task(consecutive_step_errors=3, last_error="element not found: #submit")
         assert select_tier(task) == 2
 
     def test_capability_goes_straight_to_tier3(self):
-        from scripts.heal import select_tier
+        from heal import select_tier
         task = _task(consecutive_step_errors=1, last_error="CUDA out of memory")
         assert select_tier(task) == 3
 
     def test_exhausted_goes_tier4(self):
-        from scripts.heal import select_tier
+        from heal import select_tier
         task = _task(blocked_heartbeats=5, attempts=14)
         assert select_tier(task) == 4
 
     def test_max_attempts_reached_goes_tier4(self):
-        from scripts.heal import select_tier
+        from heal import select_tier
         task = _task(attempts=15, max_attempts=15, last_error="timeout")
         assert select_tier(task) == 4
 
     def test_transient_high_errors_goes_tier2(self):
-        from scripts.heal import select_tier
+        from heal import select_tier
         # 3 consecutive errors on a transient error -> tier 2
         task = _task(consecutive_step_errors=3, last_error="rate limit exceeded")
         assert select_tier(task) == 2
@@ -147,7 +150,7 @@ class TestTier1Retry:
 
     def test_retry_decorator_is_present_on_helper(self):
         """_do_retry_subprocess must be wrapped with tenacity @retry."""
-        import scripts.heal as heal
+        import heal
         helper = heal._do_retry_subprocess
         # tenacity wraps functions with a wrapper that has a 'retry' attribute
         # OR the __wrapped__ attribute. Either indicates decoration.
@@ -162,7 +165,7 @@ class TestTier1Retry:
     def test_retry_called_with_different_strategy_than_current(self):
         """tier1_retry calls task_manager.py retry with a strategy string different
         from the task's current retry_strategy."""
-        from scripts.heal import tier1_retry
+        from heal import tier1_retry
 
         current_strategy = "use browser automation"
         task = _task(
@@ -176,7 +179,7 @@ class TestTier1Retry:
             calls.append(cmd)
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_subprocess_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_subprocess_run):
             result = tier1_retry("abc123", task)
 
         # Find the 'retry' call (not 'show')
@@ -198,7 +201,7 @@ class TestTier1Retry:
     def test_tier1_skips_to_tier2_when_strategy_unchanged(self):
         """If the proposed strategy equals current retry_strategy, tier1 returns 1
         (skip to next tier) without calling task_manager.py retry."""
-        from scripts.heal import tier1_retry, get_alternative, classify_error
+        from heal import tier1_retry, get_alternative, classify_error
 
         # Build a task whose last_error will produce a specific alternative
         last_error = "connection refused"
@@ -215,7 +218,7 @@ class TestTier1Retry:
             subprocess_calls.append(cmd)
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_subprocess_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_subprocess_run):
             result = tier1_retry("abc123", task)
 
         retry_calls = [c for c in subprocess_calls if "retry" in c]
@@ -226,7 +229,7 @@ class TestTier1Retry:
 
     def test_tier1_returns_1_when_subprocess_fails(self):
         """When _do_retry_subprocess exhausts all tenacity retries, tier1 returns 1."""
-        from scripts.heal import tier1_retry
+        from heal import tier1_retry
 
         task = _task(last_error="timeout after 30s", retry_strategy=None)
 
@@ -236,9 +239,9 @@ class TestTier1Retry:
             # 'show' or other calls succeed with minimal JSON
             return mock.MagicMock(returncode=0, stdout=json.dumps(task), stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_subprocess_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_subprocess_run):
             # Patch tenacity to not actually sleep during test retries
-            with mock.patch("scripts.heal.time.sleep", return_value=None):
+            with mock.patch("heal.time.sleep", return_value=None):
                 result = tier1_retry("abc123", task)
 
         assert result == 1
@@ -260,7 +263,7 @@ class TestTier2AlternativeApproach:
         ("element not found", "browse.py"),
     ])
     def test_get_alternative_returns_meaningful_string(self, error_fragment, expected_fragment):
-        from scripts.heal import get_alternative
+        from heal import get_alternative
         alt = get_alternative(error_fragment)
         assert expected_fragment.lower() in alt.lower(), (
             f"get_alternative({error_fragment!r}) = {alt!r}, "
@@ -268,13 +271,13 @@ class TestTier2AlternativeApproach:
         )
 
     def test_get_alternative_returns_string_for_unknown_error(self):
-        from scripts.heal import get_alternative
+        from heal import get_alternative
         alt = get_alternative("completely unknown problem xyz")
         assert isinstance(alt, str) and len(alt) > 0
 
     def test_tier2_calls_task_manager_retry(self):
         """tier2_alternative calls task_manager.py retry with an alternative strategy."""
-        from scripts.heal import tier2_alternative
+        from heal import tier2_alternative
 
         task = _task(last_error="captcha detected")
 
@@ -284,7 +287,7 @@ class TestTier2AlternativeApproach:
             calls.append(cmd)
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier2_alternative("abc123", task)
 
         retry_calls = [c for c in calls if "retry" in c]
@@ -297,7 +300,7 @@ class TestTier2AlternativeApproach:
 
     def test_tier2_returns_1_on_subprocess_error(self):
         """tier2_alternative returns 1 when task_manager.py retry fails."""
-        from scripts.heal import tier2_alternative
+        from heal import tier2_alternative
 
         task = _task(last_error="captcha detected")
 
@@ -306,7 +309,7 @@ class TestTier2AlternativeApproach:
                 raise subprocess.CalledProcessError(1, cmd)
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier2_alternative("abc123", task)
 
         assert result == 1
@@ -355,7 +358,7 @@ class TestTier3ModelFallback:
 
     def test_sonnet_falls_back_to_qwen3(self):
         """Task with context.model=Sonnet -> tier3 uses qwen3:14b as next model."""
-        from scripts.heal import tier3_model_fallback, MODEL_FALLBACK_CHAIN
+        from heal import tier3_model_fallback, MODEL_FALLBACK_CHAIN
 
         task = _task_with_context(model="anthropic/claude-sonnet-4-5")
         calls = []
@@ -364,7 +367,7 @@ class TestTier3ModelFallback:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier3_model_fallback("abc123", task)
 
         # Find retry calls to task_manager
@@ -381,7 +384,7 @@ class TestTier3ModelFallback:
 
     def test_qwen3_falls_back_to_glm(self):
         """Task with context.model=qwen3:14b -> tier3 uses GLM as next model."""
-        from scripts.heal import tier3_model_fallback
+        from heal import tier3_model_fallback
 
         task = _task_with_context(model="qwen3:14b")
         calls = []
@@ -390,7 +393,7 @@ class TestTier3ModelFallback:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier3_model_fallback("abc123", task)
 
         retry_calls = [c for c in calls if "retry" in c]
@@ -405,7 +408,7 @@ class TestTier3ModelFallback:
 
     def test_glm_last_in_chain_attempts_delegation(self):
         """When on the last model (GLM), tier3 attempts delegation instead of model swap."""
-        from scripts.heal import tier3_model_fallback
+        from heal import tier3_model_fallback
 
         # GLM is last in chain — no next model, so tries delegation
         task = _task_with_context(
@@ -419,8 +422,8 @@ class TestTier3ModelFallback:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
-            with mock.patch("scripts.heal.is_open", return_value=False):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("heal.is_open", return_value=False):
                 result = tier3_model_fallback("abc123", task)
 
         # Should have called manage.py spawn (delegation path)
@@ -429,7 +432,7 @@ class TestTier3ModelFallback:
 
     def test_no_model_in_context_defaults_to_first_chain_model(self):
         """Task with no context.model key defaults to first model in chain."""
-        from scripts.heal import tier3_model_fallback, MODEL_FALLBACK_CHAIN
+        from heal import tier3_model_fallback, MODEL_FALLBACK_CHAIN
 
         # No model key in context -> defaults to Sonnet (first in chain) -> next is Qwen3
         task = _task_with_context(model=None)
@@ -439,7 +442,7 @@ class TestTier3ModelFallback:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier3_model_fallback("abc123", task)
 
         retry_calls = [c for c in calls if "retry" in c]
@@ -472,7 +475,7 @@ class TestTier3Delegation:
 
     def test_delegation_calls_manage_spawn_when_breaker_closed(self):
         """When circuit breaker is CLOSED, tier3 calls manage.py spawn with task goal."""
-        from scripts.heal import tier3_model_fallback
+        from heal import tier3_model_fallback
 
         task = self._exhausted_task()
         calls = []
@@ -481,8 +484,8 @@ class TestTier3Delegation:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
-            with mock.patch("scripts.heal.is_open", return_value=False):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("heal.is_open", return_value=False):
                 result = tier3_model_fallback("abc123", task)
 
         spawn_calls = [c for c in calls if "spawn" in c]
@@ -493,7 +496,7 @@ class TestTier3Delegation:
 
     def test_skips_delegation_when_breaker_is_open(self):
         """When circuit breaker is_open returns True, tier3 returns exit code 3."""
-        from scripts.heal import tier3_model_fallback
+        from heal import tier3_model_fallback
 
         task = self._exhausted_task()
         calls = []
@@ -502,8 +505,8 @@ class TestTier3Delegation:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
-            with mock.patch("scripts.heal.is_open", return_value=True):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("heal.is_open", return_value=True):
                 result = tier3_model_fallback("abc123", task)
 
         # Should NOT have called manage.py spawn
@@ -513,7 +516,7 @@ class TestTier3Delegation:
 
     def test_delegation_failure_records_circuit_breaker_failure(self):
         """When manage.py spawn fails, tier3 calls circuit_breaker.record_failure."""
-        from scripts.heal import tier3_model_fallback
+        from heal import tier3_model_fallback
 
         task = self._exhausted_task()
 
@@ -522,9 +525,9 @@ class TestTier3Delegation:
                 raise subprocess.CalledProcessError(1, cmd)
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
-            with mock.patch("scripts.heal.is_open", return_value=False):
-                with mock.patch("scripts.heal.record_failure") as mock_record:
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("heal.is_open", return_value=False):
+                with mock.patch("heal.record_failure") as mock_record:
                     result = tier3_model_fallback("abc123", task)
 
         mock_record.assert_called_once()
@@ -543,7 +546,7 @@ class TestTier4Escalation:
 
     def test_tier4_calls_task_manager_escalate(self):
         """tier4_escalate calls task_manager.py escalate with the task_id."""
-        from scripts.heal import tier4_escalate
+        from heal import tier4_escalate
 
         task = _task_with_context()
         calls = []
@@ -552,7 +555,7 @@ class TestTier4Escalation:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier4_escalate("abc123", task)
 
         escalate_calls = [c for c in calls if "escalate" in c]
@@ -562,7 +565,7 @@ class TestTier4Escalation:
 
     def test_tier4_does_not_call_telegram(self):
         """tier4_escalate must NOT invoke any Telegram-related subprocess."""
-        from scripts.heal import tier4_escalate
+        from heal import tier4_escalate
 
         task = _task_with_context()
         calls = []
@@ -571,7 +574,7 @@ class TestTier4Escalation:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier4_escalate("abc123", task)
 
         # Check no Telegram-related call was made
@@ -584,7 +587,7 @@ class TestTier4Escalation:
 
     def test_tier4_records_outcome(self):
         """tier4_escalate records outcome via outcome_tracker.py with approach heal_tier4_escalated."""
-        from scripts.heal import tier4_escalate
+        from heal import tier4_escalate
 
         task = _task_with_context()
         calls = []
@@ -593,7 +596,7 @@ class TestTier4Escalation:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier4_escalate("abc123", task)
 
         # Find outcome_tracker record call
@@ -620,7 +623,7 @@ class TestTier5Skip:
 
     def test_tier5_calls_task_manager_cancel(self):
         """tier5_skip calls task_manager.py cancel with reason containing 'all recovery tiers exhausted'."""
-        from scripts.heal import tier5_skip
+        from heal import tier5_skip
 
         task = _task_with_context()
         calls = []
@@ -629,7 +632,7 @@ class TestTier5Skip:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier5_skip("abc123", task)
 
         cancel_calls = [c for c in calls if "cancel" in c]
@@ -643,7 +646,7 @@ class TestTier5Skip:
 
     def test_tier5_records_outcome_as_failure(self):
         """tier5_skip records outcome with approach 'heal_tier5_skipped' and outcome 'failure'."""
-        from scripts.heal import tier5_skip
+        from heal import tier5_skip
 
         task = _task_with_context()
         calls = []
@@ -652,7 +655,7 @@ class TestTier5Skip:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier5_skip("abc123", task)
 
         outcome_calls = [c for c in calls if "outcome_tracker" in " ".join(c) and "record" in c]
@@ -664,14 +667,14 @@ class TestTier5Skip:
 
     def test_tier5_returns_exit_code_2(self):
         """tier5_skip returns exit code 2 (all tiers exhausted)."""
-        from scripts.heal import tier5_skip
+        from heal import tier5_skip
 
         task = _task_with_context()
 
         def fake_run(cmd, **kwargs):
             return mock.MagicMock(returncode=0, stdout="", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier5_skip("abc123", task)
 
         assert result == 2, f"Expected exit code 2, got {result}"
@@ -687,7 +690,7 @@ class TestAutoTierSelection:
 
     def test_auto_selects_tier1_for_transient_low_errors(self):
         """Task with consecutive_step_errors=1, last_error=timeout -> attempt --auto runs tier1."""
-        from scripts.heal import attempt
+        from heal import attempt
 
         task = _task(consecutive_step_errors=1, last_error="timeout after 30s")
         task_with_ctx = {**task, "context": {"task_type": "general"}, "goal": "do something"}
@@ -701,8 +704,8 @@ class TestAutoTierSelection:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout=json.dumps(task_with_ctx), stderr="")
 
-        with mock.patch("scripts.heal._load_task", side_effect=fake_load):
-            with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal._load_task", side_effect=fake_load):
+            with mock.patch("heal.subprocess.run", side_effect=fake_run):
                 result = attempt("abc123")
 
         # tier1 calls task_manager retry
@@ -711,7 +714,7 @@ class TestAutoTierSelection:
 
     def test_auto_selects_tier2_for_approach_errors(self):
         """Task with consecutive_step_errors=4, last_error=captcha -> attempt --auto runs tier2."""
-        from scripts.heal import attempt, select_tier
+        from heal import attempt, select_tier
 
         task = _task(consecutive_step_errors=4, last_error="captcha detected")
         task_with_ctx = {**task, "context": {"task_type": "general"}, "goal": "do something"}
@@ -725,8 +728,8 @@ class TestAutoTierSelection:
         # Verify select_tier gives us tier 2 for this task
         assert select_tier(task) == 2, "select_tier should return 2 for captcha with many errors"
 
-        with mock.patch("scripts.heal._load_task", side_effect=fake_load):
-            with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal._load_task", side_effect=fake_load):
+            with mock.patch("heal.subprocess.run", side_effect=fake_run):
                 result = attempt("abc123")
 
         # Result should be 0 (success) since fake_run succeeds
@@ -734,7 +737,7 @@ class TestAutoTierSelection:
 
     def test_auto_selects_tier3_for_capability_errors(self):
         """Task with last_error=CUDA out of memory -> attempt --auto runs tier3."""
-        from scripts.heal import attempt, select_tier
+        from heal import attempt, select_tier
 
         task = _task(consecutive_step_errors=1, last_error="CUDA out of memory")
 
@@ -749,8 +752,8 @@ class TestAutoTierSelection:
         def fake_run(cmd, **kwargs):
             return mock.MagicMock(returncode=0, stdout=json.dumps(task_with_ctx), stderr="")
 
-        with mock.patch("scripts.heal._load_task", side_effect=fake_load):
-            with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal._load_task", side_effect=fake_load):
+            with mock.patch("heal.subprocess.run", side_effect=fake_run):
                 result = attempt("abc123")
 
         assert result in (0, 1), f"Unexpected result for tier3 auto: {result}"
@@ -775,7 +778,7 @@ class TestAutoTierStateReload:
         The reloaded task dict has updated retry_strategy and consecutive_step_errors.
         Tier 2 must receive the fresh dict, not the original stale one.
         """
-        from scripts.heal import attempt
+        from heal import attempt
 
         # First call returns task that routes to tier1, tier1 will fail
         initial_task = {
@@ -817,8 +820,8 @@ class TestAutoTierStateReload:
             subprocess_calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout=json.dumps(reloaded_task), stderr="")
 
-        with mock.patch("scripts.heal._load_task", side_effect=fake_load):
-            with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal._load_task", side_effect=fake_load):
+            with mock.patch("heal.subprocess.run", side_effect=fake_run):
                 result = attempt("abc123")
 
         # _load_task must have been called at least twice:
@@ -844,7 +847,7 @@ class TestOutcomeRecording:
 
     def test_tier1_success_records_outcome(self):
         """tier1_retry success records approach='heal_tier1_backoff', outcome='success'."""
-        from scripts.heal import tier1_retry
+        from heal import tier1_retry
 
         task = {**_task(last_error="timeout after 30s", retry_strategy=None), "context": {"task_type": "article"}, "goal": "write"}
         calls = []
@@ -853,7 +856,7 @@ class TestOutcomeRecording:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier1_retry("abc123", task)
 
         outcome_calls = self._extract_outcome_calls(calls)
@@ -864,7 +867,7 @@ class TestOutcomeRecording:
 
     def test_tier1_failure_records_outcome(self):
         """tier1_retry failure records outcome='failure'."""
-        from scripts.heal import tier1_retry
+        from heal import tier1_retry
 
         task = {**_task(last_error="timeout after 30s", retry_strategy=None), "context": {"task_type": "article"}, "goal": "write"}
         calls = []
@@ -875,8 +878,8 @@ class TestOutcomeRecording:
                 raise subprocess.CalledProcessError(1, cmd)
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
-            with mock.patch("scripts.heal.time.sleep", return_value=None):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("heal.time.sleep", return_value=None):
                 result = tier1_retry("abc123", task)
 
         outcome_calls = self._extract_outcome_calls(calls)
@@ -886,7 +889,7 @@ class TestOutcomeRecording:
 
     def test_tier2_success_records_outcome(self):
         """tier2_alternative success records approach='heal_tier2_alternative_approach'."""
-        from scripts.heal import tier2_alternative
+        from heal import tier2_alternative
 
         task = {**_task(last_error="captcha detected"), "context": {"task_type": "article"}, "goal": "write"}
         calls = []
@@ -895,7 +898,7 @@ class TestOutcomeRecording:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier2_alternative("abc123", task)
 
         outcome_calls = self._extract_outcome_calls(calls)
@@ -905,7 +908,7 @@ class TestOutcomeRecording:
 
     def test_tier3_model_fallback_records_outcome_with_model_name(self):
         """tier3 model fallback records approach containing 'heal_tier3_model_fallback'."""
-        from scripts.heal import tier3_model_fallback
+        from heal import tier3_model_fallback
 
         task = _task_with_context(model="anthropic/claude-sonnet-4-5")
         calls = []
@@ -914,7 +917,7 @@ class TestOutcomeRecording:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
             result = tier3_model_fallback("abc123", task)
 
         outcome_calls = self._extract_outcome_calls(calls)
@@ -924,7 +927,7 @@ class TestOutcomeRecording:
 
     def test_tier3_delegation_records_outcome_with_agent_name(self):
         """tier3 delegation records approach containing 'heal_tier3_delegation'."""
-        from scripts.heal import tier3_model_fallback
+        from heal import tier3_model_fallback
 
         task = _task_with_context(model="huihui_ai/glm-4.7-flash-abliterated", goal="write article")
         calls = []
@@ -933,8 +936,8 @@ class TestOutcomeRecording:
             calls.append(list(cmd))
             return mock.MagicMock(returncode=0, stdout="{}", stderr="")
 
-        with mock.patch("scripts.heal.subprocess.run", side_effect=fake_run):
-            with mock.patch("scripts.heal.is_open", return_value=False):
+        with mock.patch("heal.subprocess.run", side_effect=fake_run):
+            with mock.patch("heal.is_open", return_value=False):
                 result = tier3_model_fallback("abc123", task)
 
         outcome_calls = self._extract_outcome_calls(calls)
