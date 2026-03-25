@@ -1198,3 +1198,566 @@ class TestPreExecHooks:
         assert result.returncode == 0, (
             f"Expected exit 0 for dry-run, got {result.returncode}\nstdout={result.stdout}\nstderr={result.stderr}"
         )
+
+
+# ---------------------------------------------------------------------------
+# TestAssignTaskPreCheck — AUTO-02
+# ---------------------------------------------------------------------------
+
+
+def _write_blocklist_v2(path, patterns, safe_actions=None):
+    """Write a v2 blocklist.json to path."""
+    blocklist = {
+        "version": 2,
+        "safe_actions": safe_actions or [],
+        "patterns": patterns,
+    }
+    path.write_text(json.dumps(blocklist))
+
+
+class TestAssignTaskPreCheck:
+    """Tests that assign_task() calls pre_check() before dispatching (AUTO-02)."""
+
+    def _call_assign_task(self, task_desc, tmp_path, blocklist_path=None, mission_id=None):
+        """Call assign_task() directly with env isolation."""
+        audit_log = tmp_path / "supervisor.jsonl"
+        actions_log = tmp_path / "actions.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir(exist_ok=True)
+        env_patch = {
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "ACTIONS_AUDIT_LOG": str(actions_log),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        if blocklist_path:
+            env_patch["SUPERVISOR_BLOCKLIST_PATH"] = str(blocklist_path)
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                def fake_run(cmd, *args, **kwargs):
+                    m = MagicMock()
+                    m.returncode = 0
+                    if "route" in str(cmd):
+                        m.stdout = "  agent: contentagent\n"
+                    else:
+                        m.stdout = "SPAWN_READY:\n"
+                    return m
+                mock_run.side_effect = fake_run
+                result = sup.assign_task(task_desc, mission_id=mission_id)
+        return result, mock_run
+
+    def test_assign_task_blocked_purchase(self, tmp_path):
+        """assign_task('purchase a domain') returns 'BLOCKED' and does not call manage.py spawn."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [
+            {"pattern": "payment|purchase|buy|charge",
+             "reason": "financial action requires Alex approval",
+             "severity": "critical"},
+        ])
+        result, mock_run = self._call_assign_task("purchase a domain", tmp_path, blocklist_path=bl)
+        assert result == "BLOCKED", f"Expected BLOCKED, got {result!r}"
+        spawn_calls = [c for c in mock_run.call_args_list if "spawn" in str(c)]
+        assert len(spawn_calls) == 0, f"Blocked task should not reach spawn; spawn_calls={spawn_calls}"
+
+    def test_assign_task_blocked_audit_record(self, tmp_path):
+        """Blocked assign_task writes audit record with op='assign_task_blocked'."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [
+            {"pattern": "delete.*all", "reason": "mass deletion blocked", "severity": "critical"},
+        ])
+        audit_log = tmp_path / "supervisor.jsonl"
+        actions_log = tmp_path / "actions.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir(exist_ok=True)
+        env_patch = {
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "ACTIONS_AUDIT_LOG": str(actions_log),
+            "SUPERVISOR_BLOCKLIST_PATH": str(bl),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run"):
+                sup.assign_task("delete all user records")
+        records = [json.loads(l) for l in audit_log.read_text().strip().splitlines() if l.strip()]
+        blocked_recs = [r for r in records if r.get("op") == "assign_task_blocked"]
+        assert len(blocked_recs) >= 1, f"Expected assign_task_blocked audit record. ops={[r['op'] for r in records]}"
+
+    def test_assign_task_allowed_proceeds(self, tmp_path):
+        """assign_task('write SEO article') proceeds to route+spawn."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [
+            {"pattern": "delete.*all", "reason": "mass deletion blocked", "severity": "critical"},
+        ])
+        result, mock_run = self._call_assign_task("write SEO article", tmp_path, blocklist_path=bl)
+        assert result != "BLOCKED", f"Safe task should not be blocked"
+        spawn_calls = [c for c in mock_run.call_args_list if "spawn" in str(c)]
+        assert len(spawn_calls) >= 1, f"Safe task should reach spawn; calls={mock_run.call_args_list}"
+
+
+# ---------------------------------------------------------------------------
+# TestContextAwareRisk — AUTO-08
+# ---------------------------------------------------------------------------
+
+
+class TestContextAwareRisk:
+    """Tests context-aware risk scoring via context_rules in blocklist (AUTO-08)."""
+
+    def _write_context_blocklist(self, path):
+        """Write a blocklist with context_rules on post.*reddit."""
+        blocklist = {
+            "version": 2,
+            "safe_actions": [],
+            "patterns": [
+                {
+                    "pattern": "post.*reddit|submit.*reddit",
+                    "reason": "Reddit activity — check account context",
+                    "severity": "medium",
+                    "context_rules": [
+                        {"if_context_contains": "test_account|warmup",
+                         "override_severity": "low"},
+                        {"if_context_contains": "main_account|primary",
+                         "override_severity": "high"},
+                    ],
+                }
+            ],
+        }
+        path.write_text(json.dumps(blocklist))
+
+    def _call_pre_check_ctx(self, action, blocklist_path, audit_log, context=None):
+        """Call pre_check() with context param via env isolation."""
+        env_patch = {
+            "SUPERVISOR_BLOCKLIST_PATH": str(blocklist_path),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+        }
+        old_env = {}
+        for k, v in env_patch.items():
+            old_env[k] = os.environ.get(k)
+            os.environ[k] = v
+        try:
+            sup = _import_supervisor_fresh()
+            return sup.pre_check(action, context=context)
+        finally:
+            for k, old_v in old_env.items():
+                if old_v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old_v
+
+    def test_context_override_low_allows(self, tmp_path):
+        """context={'account_type': 'test_account'} overrides medium->low, returns True."""
+        bl = tmp_path / "blocklist.json"
+        self._write_context_blocklist(bl)
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check_ctx(
+            "post to reddit", bl, audit_log,
+            context={"account_type": "test_account"}
+        )
+        assert allowed is True, f"Expected allowed=True for test_account context, got {allowed!r}, reason={reason!r}"
+
+    def test_context_override_high_blocks(self, tmp_path):
+        """context={'account_type': 'main_account'} overrides medium->high, returns False."""
+        bl = tmp_path / "blocklist.json"
+        self._write_context_blocklist(bl)
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check_ctx(
+            "post to reddit", bl, audit_log,
+            context={"account_type": "main_account"}
+        )
+        assert allowed is False, f"Expected allowed=False for main_account context, got {allowed!r}"
+        assert reason, f"Expected non-empty reason for blocked action"
+
+    def test_context_none_uses_default_severity(self, tmp_path):
+        """No context (None) uses pattern's default severity (medium=log+proceed)."""
+        bl = tmp_path / "blocklist.json"
+        self._write_context_blocklist(bl)
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check_ctx("post to reddit", bl, audit_log, context=None)
+        # medium severity = log+proceed = allowed
+        assert allowed is True, f"Expected medium to allow with no context, got {allowed!r}"
+
+
+# ---------------------------------------------------------------------------
+# TestSafeActions — AUTO-06
+# ---------------------------------------------------------------------------
+
+
+class TestSafeActions:
+    """Tests that safe_actions list bypasses pattern matching entirely (AUTO-06)."""
+
+    def _call_pre_check_safe(self, action, blocklist_path, audit_log):
+        env_patch = {
+            "SUPERVISOR_BLOCKLIST_PATH": str(blocklist_path),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+        }
+        old_env = {}
+        for k, v in env_patch.items():
+            old_env[k] = os.environ.get(k)
+            os.environ[k] = v
+        try:
+            sup = _import_supervisor_fresh()
+            return sup.pre_check(action)
+        finally:
+            for k, old_v in old_env.items():
+                if old_v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old_v
+
+    def test_write_file_safe_action_bypasses_block(self, tmp_path):
+        """'write file to /tmp/test.txt' matches safe_actions, bypasses all patterns."""
+        bl = tmp_path / "blocklist.json"
+        # Even with a pattern that would match, safe_actions should short-circuit
+        _write_blocklist_v2(bl, [
+            {"pattern": "write.*file", "reason": "should not reach this", "severity": "critical"},
+        ], safe_actions=["write.*file|create.*file|save.*file"])
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check_safe("write file to /tmp/test.txt", bl, audit_log)
+        assert allowed is True, f"Expected safe_action to bypass block, got {allowed!r}, reason={reason!r}"
+
+    def test_run_script_safe_action(self, tmp_path):
+        """'run script check_links.py' matches run.*script safe_action."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [
+            {"pattern": "delete.*all", "reason": "mass deletion blocked", "severity": "critical"},
+        ], safe_actions=["run.*script|execute.*script|python3"])
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check_safe("run script check_links.py", bl, audit_log)
+        assert allowed is True, f"Expected run script to be a safe action"
+
+    def test_safe_action_audit_record(self, tmp_path):
+        """Safe action match writes audit record with result='SAFE_ACTION'."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [], safe_actions=["write.*file"])
+        audit_log = tmp_path / "supervisor.jsonl"
+        self._call_pre_check_safe("write file to /tmp/output.txt", bl, audit_log)
+        records = [json.loads(l) for l in audit_log.read_text().strip().splitlines() if l.strip()]
+        safe_recs = [r for r in records if r.get("op") == "pre_check"
+                     and r.get("data", {}).get("result") == "SAFE_ACTION"]
+        assert len(safe_recs) >= 1, f"Expected SAFE_ACTION audit record. records={records}"
+
+    def test_no_safe_actions_does_not_bypass(self, tmp_path):
+        """Empty safe_actions list does not bypass pattern matching."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [
+            {"pattern": "delete.*all", "reason": "mass deletion blocked", "severity": "critical"},
+        ], safe_actions=[])
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check_safe("delete all records", bl, audit_log)
+        assert allowed is False, f"Expected pattern block without safe_actions bypass"
+
+
+# ---------------------------------------------------------------------------
+# TestSeverityMapping — AUTO-03
+# ---------------------------------------------------------------------------
+
+
+class TestSeverityMapping:
+    """Tests that critical/high block, medium logs+proceeds, low allows."""
+
+    def _call_pre_check_sev(self, action, blocklist_path, audit_log):
+        env_patch = {
+            "SUPERVISOR_BLOCKLIST_PATH": str(blocklist_path),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+        }
+        old_env = {}
+        for k, v in env_patch.items():
+            old_env[k] = os.environ.get(k)
+            os.environ[k] = v
+        try:
+            sup = _import_supervisor_fresh()
+            return sup.pre_check(action)
+        finally:
+            for k, old_v in old_env.items():
+                if old_v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old_v
+
+    def test_critical_blocks(self, tmp_path):
+        """severity='critical' blocks the action."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [
+            {"pattern": "dangerous.*action", "reason": "critical block", "severity": "critical"},
+        ])
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check_sev("do dangerous action", bl, audit_log)
+        assert allowed is False
+
+    def test_high_blocks(self, tmp_path):
+        """severity='high' blocks the action."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [
+            {"pattern": "risky.*action", "reason": "high block", "severity": "high"},
+        ])
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check_sev("do risky action", bl, audit_log)
+        assert allowed is False
+
+    def test_medium_log_proceed(self, tmp_path):
+        """severity='medium' allows the action but writes MEDIUM_PROCEED audit record."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [
+            {"pattern": "medium.*action", "reason": "medium log", "severity": "medium"},
+        ])
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check_sev("do medium action", bl, audit_log)
+        assert allowed is True, f"Expected medium to allow, got {allowed!r}"
+        records = [json.loads(l) for l in audit_log.read_text().strip().splitlines() if l.strip()]
+        medium_recs = [r for r in records if r.get("data", {}).get("result") == "MEDIUM_PROCEED"]
+        assert len(medium_recs) >= 1, f"Expected MEDIUM_PROCEED audit record. records={records}"
+
+    def test_low_allows_silently(self, tmp_path):
+        """severity='low' allows the action silently (no BLOCKED or MEDIUM_PROCEED)."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [
+            {"pattern": "low.*action", "reason": "low allow", "severity": "low"},
+        ])
+        audit_log = tmp_path / "supervisor.jsonl"
+        allowed, reason = self._call_pre_check_sev("do low action", bl, audit_log)
+        assert allowed is True, f"Expected low to allow, got {allowed!r}"
+        if audit_log.exists():
+            records = [json.loads(l) for l in audit_log.read_text().strip().splitlines() if l.strip()]
+            blocked = [r for r in records if r.get("data", {}).get("result") == "BLOCKED"]
+            assert len(blocked) == 0, f"Low severity should not produce BLOCKED records"
+
+
+# ---------------------------------------------------------------------------
+# TestAutonomyTierEnforcement — AUTO-04
+# ---------------------------------------------------------------------------
+
+
+class TestAutonomyTierEnforcement:
+    """Tests tier 1/2/3 enforcement in assign_task() (AUTO-04)."""
+
+    def _write_mission(self, missions_dir, mission_id, autonomy_tier=1):
+        """Write a mission JSON file with given autonomy_tier."""
+        missions_dir.mkdir(parents=True, exist_ok=True)
+        mission = {
+            "id": mission_id,
+            "goal": "Test mission",
+            "status": "ACTIVE",
+            "autonomy_tier": autonomy_tier,
+        }
+        (missions_dir / f"mission_{mission_id}.json").write_text(json.dumps(mission))
+
+    def test_tier3_returns_tier3_alert(self, tmp_path):
+        """assign_task with tier-3 mission returns 'TIER3_ALERT' and does not spawn."""
+        missions_dir = tmp_path / "missions"
+        self._write_mission(missions_dir, "M-tier3test", autonomy_tier=3)
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [])  # No blocking patterns
+        audit_log = tmp_path / "supervisor.jsonl"
+        actions_log = tmp_path / "actions.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "MISSIONS_DIR": str(missions_dir),
+            "MISSION_DIR": str(missions_dir),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "ACTIONS_AUDIT_LOG": str(actions_log),
+            "SUPERVISOR_BLOCKLIST_PATH": str(bl),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="  agent: contentagent\n")
+                result = sup.assign_task("write article", mission_id="M-tier3test")
+        assert result == "TIER3_ALERT", f"Expected TIER3_ALERT, got {result!r}"
+        # Verify spawn was not called
+        spawn_calls = [c for c in mock_run.call_args_list if "spawn" in str(c)]
+        assert len(spawn_calls) == 0, f"Tier-3 should not spawn; calls={mock_run.call_args_list}"
+
+    def test_tier3_writes_audit_record(self, tmp_path):
+        """Tier-3 assign_task writes audit record with op='tier3_alert'."""
+        missions_dir = tmp_path / "missions"
+        self._write_mission(missions_dir, "M-tier3audit", autonomy_tier=3)
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [])
+        audit_log = tmp_path / "supervisor.jsonl"
+        actions_log = tmp_path / "actions.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "MISSIONS_DIR": str(missions_dir),
+            "MISSION_DIR": str(missions_dir),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "ACTIONS_AUDIT_LOG": str(actions_log),
+            "SUPERVISOR_BLOCKLIST_PATH": str(bl),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stdout="")
+                sup.assign_task("write article", mission_id="M-tier3audit")
+        records = [json.loads(l) for l in audit_log.read_text().strip().splitlines() if l.strip()]
+        tier3_recs = [r for r in records if r.get("op") == "tier3_alert"]
+        assert len(tier3_recs) >= 1, f"Expected tier3_alert audit record. ops={[r['op'] for r in records]}"
+
+    def test_tier2_proceeds_with_extra_audit(self, tmp_path):
+        """Tier-2 assign_task spawns normally but writes 'tier2_dispatch' audit record."""
+        missions_dir = tmp_path / "missions"
+        self._write_mission(missions_dir, "M-tier2test", autonomy_tier=2)
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [])
+        audit_log = tmp_path / "supervisor.jsonl"
+        actions_log = tmp_path / "actions.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "MISSIONS_DIR": str(missions_dir),
+            "MISSION_DIR": str(missions_dir),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "ACTIONS_AUDIT_LOG": str(actions_log),
+            "SUPERVISOR_BLOCKLIST_PATH": str(bl),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                def fake_run(cmd, *args, **kwargs):
+                    m = MagicMock()
+                    m.returncode = 0
+                    if "route" in str(cmd):
+                        m.stdout = "  agent: contentagent\n"
+                    else:
+                        m.stdout = "SPAWN_READY:\n"
+                    return m
+                mock_run.side_effect = fake_run
+                result = sup.assign_task("write article", mission_id="M-tier2test")
+        assert result != "TIER3_ALERT", f"Tier-2 should not return TIER3_ALERT"
+        assert result != "BLOCKED", f"Tier-2 should not be blocked"
+        records = [json.loads(l) for l in audit_log.read_text().strip().splitlines() if l.strip()]
+        tier2_recs = [r for r in records if r.get("op") == "tier2_dispatch"]
+        assert len(tier2_recs) >= 1, f"Expected tier2_dispatch record. ops={[r['op'] for r in records]}"
+
+    def test_tier1_proceeds_normally(self, tmp_path):
+        """Tier-1 assign_task spawns normally without extra tier audit records."""
+        missions_dir = tmp_path / "missions"
+        self._write_mission(missions_dir, "M-tier1test", autonomy_tier=1)
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [])
+        audit_log = tmp_path / "supervisor.jsonl"
+        actions_log = tmp_path / "actions.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "MISSIONS_DIR": str(missions_dir),
+            "MISSION_DIR": str(missions_dir),
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "ACTIONS_AUDIT_LOG": str(actions_log),
+            "SUPERVISOR_BLOCKLIST_PATH": str(bl),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                def fake_run(cmd, *args, **kwargs):
+                    m = MagicMock()
+                    m.returncode = 0
+                    if "route" in str(cmd):
+                        m.stdout = "  agent: contentagent\n"
+                    else:
+                        m.stdout = "SPAWN_READY:\n"
+                    return m
+                mock_run.side_effect = fake_run
+                result = sup.assign_task("write article", mission_id="M-tier1test")
+        assert result != "TIER3_ALERT"
+        assert result != "BLOCKED"
+        spawn_calls = [c for c in mock_run.call_args_list if "spawn" in str(c)]
+        assert len(spawn_calls) >= 1, f"Tier-1 should spawn normally; calls={mock_run.call_args_list}"
+
+    def test_no_mission_id_skips_tier_check(self, tmp_path):
+        """assign_task with no mission_id proceeds without tier enforcement."""
+        bl = tmp_path / "blocklist.json"
+        _write_blocklist_v2(bl, [])
+        audit_log = tmp_path / "supervisor.jsonl"
+        actions_log = tmp_path / "actions.jsonl"
+        exec_dir = tmp_path / "execution"
+        exec_dir.mkdir()
+        env_patch = {
+            "SUPERVISOR_AUDIT_LOG": str(audit_log),
+            "ACTIONS_AUDIT_LOG": str(actions_log),
+            "SUPERVISOR_BLOCKLIST_PATH": str(bl),
+            "SUPERVISOR_EXEC_DIR": str(exec_dir),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            with patch("subprocess.run") as mock_run:
+                def fake_run(cmd, *args, **kwargs):
+                    m = MagicMock()
+                    m.returncode = 0
+                    if "route" in str(cmd):
+                        m.stdout = "  agent: contentagent\n"
+                    else:
+                        m.stdout = "SPAWN_READY:\n"
+                    return m
+                mock_run.side_effect = fake_run
+                result = sup.assign_task("write article")  # no mission_id
+        assert result != "TIER3_ALERT"
+        assert result != "BLOCKED"
+        spawn_calls = [c for c in mock_run.call_args_list if "spawn" in str(c)]
+        assert len(spawn_calls) >= 1, f"No mission_id should spawn normally"
+
+
+# ---------------------------------------------------------------------------
+# TestLogAction — AUTO-05
+# ---------------------------------------------------------------------------
+
+
+class TestLogAction:
+    """Tests that log_action() writes to actions.jsonl (AUTO-05)."""
+
+    def test_log_action_writes_record(self, tmp_path):
+        """log_action() appends a JSONL record with ts, op, data fields."""
+        actions_log = tmp_path / "actions.jsonl"
+        env_patch = {
+            "ACTIONS_AUDIT_LOG": str(actions_log),
+            "SUPERVISOR_AUDIT_LOG": str(tmp_path / "supervisor.jsonl"),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            sup.log_action("assign_task", {"task": "test task", "agent": "seoagent"})
+        assert actions_log.exists(), "actions.jsonl should be created by log_action()"
+        records = [json.loads(l) for l in actions_log.read_text().strip().splitlines() if l.strip()]
+        assert len(records) == 1, f"Expected 1 record, got {len(records)}"
+        rec = records[0]
+        assert "ts" in rec, f"Record missing 'ts' field: {rec}"
+        assert rec["op"] == "assign_task", f"Expected op='assign_task', got {rec['op']!r}"
+        assert rec["data"]["task"] == "test task"
+        assert rec["data"]["agent"] == "seoagent"
+
+    def test_log_action_appends_multiple(self, tmp_path):
+        """Multiple log_action() calls append multiple records."""
+        actions_log = tmp_path / "actions.jsonl"
+        env_patch = {
+            "ACTIONS_AUDIT_LOG": str(actions_log),
+            "SUPERVISOR_AUDIT_LOG": str(tmp_path / "supervisor.jsonl"),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            sup.log_action("op1", {"x": 1})
+            sup.log_action("op2", {"x": 2})
+            sup.log_action("op3", {"x": 3})
+        records = [json.loads(l) for l in actions_log.read_text().strip().splitlines() if l.strip()]
+        assert len(records) == 3
+        assert [r["op"] for r in records] == ["op1", "op2", "op3"]
+
+    def test_log_action_env_var_override(self, tmp_path):
+        """ACTIONS_AUDIT_LOG env var overrides default path."""
+        custom_log = tmp_path / "custom_actions.jsonl"
+        env_patch = {
+            "ACTIONS_AUDIT_LOG": str(custom_log),
+            "SUPERVISOR_AUDIT_LOG": str(tmp_path / "supervisor.jsonl"),
+        }
+        with _env_context(env_patch):
+            sup = _import_supervisor()
+            sup.log_action("test_op", {"info": "custom path test"})
+        assert custom_log.exists(), f"Custom log path should be used: {custom_log}"
+        default_log = Path("/home/alex/.openclaw/workspace/memory/audit/actions.jsonl")
+        # Only check default isn't written if it doesn't already exist from prod
+        records = [json.loads(l) for l in custom_log.read_text().strip().splitlines() if l.strip()]
+        assert len(records) == 1
+        assert records[0]["op"] == "test_op"

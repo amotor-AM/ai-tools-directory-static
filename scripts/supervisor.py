@@ -78,6 +78,12 @@ BLOCKLIST_PATH = Path(os.environ.get(
     "/home/alex/.openclaw/workspace/memory/guardrails/blocklist.json"
 ))
 
+# Actions audit log — non-supervisor autonomous action trail (AUTO-05)
+ACTIONS_AUDIT_LOG = Path(os.environ.get(
+    "ACTIONS_AUDIT_LOG",
+    "/home/alex/.openclaw/workspace/memory/audit/actions.jsonl"
+))
+
 # Downstream script paths
 TM_PATH = "/home/alex/.openclaw/workspace/skills/aria-taskmanager/scripts/task_manager.py"
 HEAL_PATH = "/home/alex/.openclaw/workspace/scripts/heal.py"
@@ -115,6 +121,28 @@ def _audit(op: str, data: dict) -> None:
     line = json.dumps(record, separators=(",", ":")) + "\n"
     with open(audit_path, "a") as f:
         f.write(line)
+
+
+def log_action(op: str, data: dict) -> None:
+    """Record a non-supervisor autonomous action to actions.jsonl (AUTO-05).
+
+    Covers actions not captured by _audit() (which writes to supervisor.jsonl):
+    assign_task dispatches, briefing sends, event chain triggers.
+    Append-only JSONL, same atomic write pattern as _audit().
+    """
+    # Re-read ACTIONS_AUDIT_LOG at call time so env var overrides take effect
+    actions_path = Path(os.environ.get("ACTIONS_AUDIT_LOG", str(ACTIONS_AUDIT_LOG)))
+    actions_path.parent.mkdir(parents=True, exist_ok=True)
+    record = json.dumps({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "op": op,
+        "data": data,
+    }, separators=(",", ":"))
+    fd = os.open(str(actions_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, (record + "\n").encode())
+    finally:
+        os.close(fd)
 
 
 # ---------------------------------------------------------------------------
@@ -208,17 +236,69 @@ def _trigger_adapt(mission_id: str) -> None:
 # Sub-agent assignment (SUPV-05)
 # ---------------------------------------------------------------------------
 
-def assign_task(task_description: str, mission_id: str | None = None) -> str:
+def _load_mission_tier(mission_id: str) -> int:
+    """Load autonomy_tier from a mission JSON file. Returns 1 (full-auto) if not found."""
+    missions_dir = Path(os.environ.get("MISSIONS_DIR",
+        os.environ.get("MISSION_DIR", str(MISSIONS_DIR))))
+    mission_file = missions_dir / f"mission_{mission_id}.json"
+    if not mission_file.exists():
+        return 1
+    try:
+        mission = json.loads(mission_file.read_text())
+        return mission.get("autonomy_tier", 1)
+    except (json.JSONDecodeError, OSError):
+        return 1
+
+
+def assign_task(task_description: str, mission_id: str | None = None, context: dict | None = None) -> str:
     """Route a task description to the best sub-agent and spawn it.
 
     Steps:
+      0. AUTO-02: Call pre_check() — blocked tasks never reach manage.py spawn.
+      0b. AUTO-04: Check autonomy_tier from mission — tier 3 routes to briefing alert.
       1. Call manage.py route <description> to get the agent slug.
       2. Call manage.py spawn <slug> --task <description> [--mission-id <id>].
       3. Write audit record with op='assign_task'.
 
-    Returns the agent slug selected by routing.
+    Returns the agent slug selected by routing, or 'BLOCKED' / 'TIER3_ALERT'.
     """
     import subprocess
+
+    # AUTO-02: Pre-execution hook before any dispatch
+    allowed, reason = pre_check(task_description, context=context)
+    if not allowed:
+        _audit("assign_task_blocked", {
+            "task": task_description[:200],
+            "blocked_by": reason,
+            "mission_id": mission_id,
+        })
+        return "BLOCKED"
+
+    # AUTO-04: Autonomy tier enforcement
+    if mission_id:
+        tier = _load_mission_tier(mission_id)
+        if tier == 3:
+            # Tier 3: brief Alex instead of spawning
+            alert_msg = f"Tier-3 approval needed: {task_description[:120]}"
+            subprocess.run(
+                [sys.executable, str(Path(__file__).resolve().parent / "briefing.py"),
+                 "alert", "--text", alert_msg,
+                 "--category", "blocker_critical"],
+                capture_output=True,
+                timeout=15,
+            )
+            _audit("tier3_alert", {
+                "task": task_description[:200],
+                "mission_id": mission_id,
+            })
+            log_action("tier3_alert", {"task": task_description[:200], "mission_id": mission_id})
+            return "TIER3_ALERT"
+        elif tier == 2:
+            # Tier 2: log extra audit record, then proceed normally
+            _audit("tier2_dispatch", {
+                "task": task_description[:200],
+                "mission_id": mission_id,
+            })
 
     # Step 1: route
     route_result = subprocess.run(
@@ -251,6 +331,13 @@ def assign_task(task_description: str, mission_id: str | None = None) -> str:
         "task": task_description[:200],
         "agent": agent_slug,
         "mission_id": mission_id,
+    })
+
+    # AUTO-05: Log to actions.jsonl for non-supervisor action coverage
+    log_action("assign_task", {
+        "task": task_description[:200],
+        "mission_id": mission_id,
+        "agent": agent_slug,
     })
 
     return agent_slug
@@ -291,17 +378,19 @@ def _load_blocklist() -> dict:
         return {"version": 0, "patterns": []}
 
 
-def pre_check(action_description: str, dry_run: bool = False) -> tuple:
+def pre_check(action_description: str, dry_run: bool = False, context: dict | None = None) -> tuple:
     """Check an action description against the blocklist before execution.
 
     Pattern matching is case-insensitive regex. First matching pattern wins
     (unless dry-run, which logs all matches without blocking).
 
-    Audit-logs every call — ALLOWED, BLOCKED, or DRY_RUN_MATCH.
+    Audit-logs every call — ALLOWED, BLOCKED, SAFE_ACTION, MEDIUM_PROCEED, or DRY_RUN_MATCH.
 
     Args:
         action_description: Human-readable description of the action to check.
         dry_run: If True, log pattern matches but never block (return True).
+        context: Optional dict for context-aware risk scoring (AUTO-08).
+                 e.g. {"account_type": "test_account"} — matched against context_rules.
 
     Returns:
         (allowed: bool, reason: str)
@@ -311,6 +400,17 @@ def pre_check(action_description: str, dry_run: bool = False) -> tuple:
     blocklist = _load_blocklist()
     patterns = blocklist.get("patterns", [])
     action_lower = action_description.lower()
+
+    # AUTO-06: Safe actions bypass — check before pattern matching
+    safe_actions = blocklist.get("safe_actions", [])
+    for safe_pattern in safe_actions:
+        if re.search(safe_pattern, action_lower):
+            _audit("pre_check", {
+                "action": action_description[:200],
+                "result": "SAFE_ACTION",
+                "matched": safe_pattern,
+            })
+            return (True, "")
 
     matched_in_dry_run = []
 
@@ -323,6 +423,15 @@ def pre_check(action_description: str, dry_run: bool = False) -> tuple:
             continue
 
         if re.search(pattern, action_lower):
+            # AUTO-08: Context-aware severity override
+            if context and rule.get("context_rules"):
+                context_str = json.dumps(context).lower()
+                for ctx_rule in rule["context_rules"]:
+                    condition = ctx_rule.get("if_context_contains", "")
+                    if condition and re.search(condition, context_str):
+                        severity = ctx_rule.get("override_severity", severity)
+                        break
+
             if dry_run:
                 # Log each match but keep iterating
                 _audit("pre_check", {
@@ -334,15 +443,30 @@ def pre_check(action_description: str, dry_run: bool = False) -> tuple:
                 })
                 matched_in_dry_run.append(pattern)
             else:
-                # Real block — log and return immediately
-                _audit("pre_check", {
-                    "action": action_description[:200],
-                    "result": "BLOCKED",
-                    "reason": reason,
-                    "severity": severity,
-                    "pattern": pattern,
-                })
-                return (False, reason)
+                # Severity-based decision
+                if severity in ("critical", "high"):
+                    # Real block — log and return immediately
+                    _audit("pre_check", {
+                        "action": action_description[:200],
+                        "result": "BLOCKED",
+                        "reason": reason,
+                        "severity": severity,
+                        "pattern": pattern,
+                    })
+                    return (False, reason)
+                elif severity == "medium":
+                    # Log+proceed — audit but allow
+                    _audit("pre_check", {
+                        "action": action_description[:200],
+                        "result": "MEDIUM_PROCEED",
+                        "reason": reason,
+                        "severity": severity,
+                        "pattern": pattern,
+                    })
+                    return (True, "")
+                else:
+                    # low or unknown — allow silently (continue to ALLOWED)
+                    return (True, "")
 
     # No blocking match — allowed
     _audit("pre_check", {
