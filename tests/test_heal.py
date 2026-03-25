@@ -944,3 +944,131 @@ class TestOutcomeRecording:
         assert outcome_calls, "tier3 delegation must record outcome"
         full_str = " ".join(outcome_calls[0])
         assert "heal_tier3" in full_str, f"Expected 'heal_tier3' in approach: {full_str}"
+
+
+# ---------------------------------------------------------------------------
+# TestRollback  (AUTO-09)
+# ---------------------------------------------------------------------------
+
+
+class TestRollback:
+    """Tests for register_rollback() and execute_rollback() in heal.py."""
+
+    def test_register_rollback_appends_entry(self, tmp_path, monkeypatch):
+        """register_rollback() appends an entry to rollback_registry.jsonl."""
+        import os
+        monkeypatch.setenv("ROLLBACK_REGISTRY_PATH", str(tmp_path / "rollback_registry.jsonl"))
+        if "heal" in sys.modules:
+            del sys.modules["heal"]
+        from heal import register_rollback
+
+        register_rollback("T1", "vercel_deploy", "vercel rollback --yes", reversible=True)
+
+        registry_path = tmp_path / "rollback_registry.jsonl"
+        assert registry_path.exists()
+        entries = [json.loads(line) for line in registry_path.read_text().splitlines() if line.strip()]
+        assert len(entries) == 1
+        e = entries[0]
+        assert e["task_id"] == "T1"
+        assert e["action_type"] == "vercel_deploy"
+        assert e["rollback_cmd"] == "vercel rollback --yes"
+        assert e["reversible"] is True
+        assert e["status"] == "available"
+
+    def test_register_rollback_non_reversible(self, tmp_path, monkeypatch):
+        """register_rollback() with reversible=False stores reversible=False."""
+        monkeypatch.setenv("ROLLBACK_REGISTRY_PATH", str(tmp_path / "rollback_registry.jsonl"))
+        if "heal" in sys.modules:
+            del sys.modules["heal"]
+        from heal import register_rollback
+
+        register_rollback("T2", "email_sent", "", reversible=False)
+
+        registry_path = tmp_path / "rollback_registry.jsonl"
+        entries = [json.loads(line) for line in registry_path.read_text().splitlines() if line.strip()]
+        assert len(entries) == 1
+        assert entries[0]["reversible"] is False
+        assert entries[0]["task_id"] == "T2"
+
+    def test_execute_rollback_success(self, tmp_path, monkeypatch):
+        """execute_rollback() runs command for reversible=True entry, returns (True, '')."""
+        monkeypatch.setenv("ROLLBACK_REGISTRY_PATH", str(tmp_path / "rollback_registry.jsonl"))
+        if "heal" in sys.modules:
+            del sys.modules["heal"]
+        from heal import register_rollback, execute_rollback
+
+        register_rollback("T1", "vercel_deploy", "echo rollback ok", reversible=True)
+
+        with mock.patch("heal.subprocess.run") as fake_run:
+            fake_run.return_value = mock.MagicMock(returncode=0, stdout="", stderr="")
+            # Also need to mock _record_outcome subprocess.run calls
+            with mock.patch("heal._record_outcome"):
+                success, reason = execute_rollback("T1")
+
+        assert success is True
+        assert reason == ""
+        # Verify command was called
+        call_args = fake_run.call_args
+        assert "echo rollback ok" in str(call_args)
+
+    def test_execute_rollback_not_reversible(self, tmp_path, monkeypatch):
+        """execute_rollback() returns (False, 'NOT_REVERSIBLE') for reversible=False entry."""
+        monkeypatch.setenv("ROLLBACK_REGISTRY_PATH", str(tmp_path / "rollback_registry.jsonl"))
+        if "heal" in sys.modules:
+            del sys.modules["heal"]
+        from heal import register_rollback, execute_rollback
+
+        register_rollback("T2", "email_sent", "", reversible=False)
+
+        success, reason = execute_rollback("T2")
+
+        assert success is False
+        assert reason == "NOT_REVERSIBLE"
+
+    def test_execute_rollback_no_entry(self, tmp_path, monkeypatch):
+        """execute_rollback() returns (False, 'NO_ROLLBACK_REGISTERED') when no entry exists."""
+        monkeypatch.setenv("ROLLBACK_REGISTRY_PATH", str(tmp_path / "rollback_registry.jsonl"))
+        if "heal" in sys.modules:
+            del sys.modules["heal"]
+        from heal import execute_rollback
+
+        success, reason = execute_rollback("T3_not_registered")
+
+        assert success is False
+        assert reason == "NO_ROLLBACK_REGISTERED"
+
+    def test_execute_rollback_already_rolled_back(self, tmp_path, monkeypatch):
+        """execute_rollback() returns (False, 'ALREADY_ROLLED_BACK') when entry has status='rolled_back'."""
+        monkeypatch.setenv("ROLLBACK_REGISTRY_PATH", str(tmp_path / "rollback_registry.jsonl"))
+        if "heal" in sys.modules:
+            del sys.modules["heal"]
+        from heal import register_rollback, execute_rollback
+
+        register_rollback("T1", "vercel_deploy", "echo rollback ok", reversible=True)
+
+        # First rollback succeeds
+        with mock.patch("heal.subprocess.run") as fake_run:
+            fake_run.return_value = mock.MagicMock(returncode=0, stdout="", stderr="")
+            with mock.patch("heal._record_outcome"):
+                success1, reason1 = execute_rollback("T1")
+
+        assert success1 is True
+
+        # Second rollback should fail with ALREADY_ROLLED_BACK
+        success2, reason2 = execute_rollback("T1")
+        assert success2 is False
+        assert reason2 == "ALREADY_ROLLED_BACK"
+
+    def test_rollback_registry_path_env_var(self, tmp_path, monkeypatch):
+        """ROLLBACK_REGISTRY_PATH env var controls where registry is written."""
+        custom_path = tmp_path / "custom" / "my_registry.jsonl"
+        monkeypatch.setenv("ROLLBACK_REGISTRY_PATH", str(custom_path))
+        if "heal" in sys.modules:
+            del sys.modules["heal"]
+        from heal import register_rollback
+
+        register_rollback("T_env", "vercel_deploy", "vercel rollback --yes", reversible=True)
+
+        assert custom_path.exists()
+        entries = [json.loads(line) for line in custom_path.read_text().splitlines() if line.strip()]
+        assert entries[0]["task_id"] == "T_env"

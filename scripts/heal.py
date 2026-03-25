@@ -26,6 +26,8 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -37,6 +39,19 @@ TM_PATH = "/home/alex/.openclaw/workspace/skills/aria-taskmanager/scripts/task_m
 OUTCOME_TRACKER = "/home/alex/.openclaw/workspace/scripts/outcome_tracker.py"
 MANAGE_PATH = "/home/alex/.openclaw/workspace/agents/manage.py"
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Rollback registry — append-only JSONL (AUTO-09)
+ROLLBACK_REGISTRY = Path(os.environ.get(
+    "ROLLBACK_REGISTRY_PATH",
+    "/home/alex/.openclaw/workspace/memory/audit/rollback_registry.jsonl"
+))
+
+# Known reversible action types and their rollback command templates
+REVERSIBLE_ACTION_TYPES = {
+    "vercel_deploy": "vercel rollback --yes",
+    "wordpress_post": "python3 {scripts_dir}/wordpress.py delete --post-id {post_id}",
+    "wordpress_publish": "python3 {scripts_dir}/wordpress.py unpublish --post-id {post_id}",
+}
 
 # ---------------------------------------------------------------------------
 # Circuit breaker imports (lazy path setup for portability)
@@ -577,6 +592,105 @@ def attempt(task_id: str, tier: int | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Rollback registry (AUTO-09)
+# ---------------------------------------------------------------------------
+
+
+def register_rollback(task_id: str, action_type: str, rollback_cmd: str, reversible: bool = True) -> None:
+    """Register a rollback command for a completed action.
+
+    Called by supervisor.py validate_task() on PASS when the action has
+    a known rollback procedure. For non-reversible actions, stores
+    reversible=False so execute_rollback() can bail cleanly.
+
+    Appends to ROLLBACK_REGISTRY (append-only JSONL, O_APPEND atomic writes).
+    """
+    # Re-read ROLLBACK_REGISTRY_PATH at call time so env var overrides take effect
+    registry = Path(os.environ.get("ROLLBACK_REGISTRY_PATH", str(ROLLBACK_REGISTRY)))
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    entry = json.dumps({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "task_id": task_id,
+        "action_type": action_type,
+        "rollback_cmd": rollback_cmd,
+        "reversible": reversible,
+        "status": "available",
+    })
+    fd = os.open(str(registry), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, (entry + "\n").encode())
+    finally:
+        os.close(fd)
+
+
+def execute_rollback(task_id: str) -> tuple:
+    """Find and execute the rollback command for a task.
+
+    Returns (success: bool, reason: str).
+    success=True means rollback command was executed successfully.
+    Reasons for False: NO_ROLLBACK_REGISTERED, NOT_REVERSIBLE, ALREADY_ROLLED_BACK,
+                       NO_ROLLBACK_CMD, ROLLBACK_FAILED.
+    """
+    # Re-read ROLLBACK_REGISTRY_PATH at call time so env var overrides take effect
+    registry = Path(os.environ.get("ROLLBACK_REGISTRY_PATH", str(ROLLBACK_REGISTRY)))
+    if not registry.exists():
+        return False, "NO_ROLLBACK_REGISTERED"
+
+    entries = []
+    for line in registry.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    # Find the most recent entry for this task_id
+    matching = [e for e in entries if e.get("task_id") == task_id]
+    if not matching:
+        return False, "NO_ROLLBACK_REGISTERED"
+
+    entry = matching[-1]  # most recent
+
+    if entry.get("status") == "rolled_back":
+        return False, "ALREADY_ROLLED_BACK"
+    if not entry.get("reversible", False):
+        return False, "NOT_REVERSIBLE"
+
+    rollback_cmd = entry.get("rollback_cmd", "")
+    if not rollback_cmd:
+        return False, "NO_ROLLBACK_CMD"
+
+    # Execute the rollback command
+    result = subprocess.run(
+        rollback_cmd, shell=True, capture_output=True, text=True, timeout=60
+    )
+
+    # Mark as rolled back by appending a new status entry
+    mark_entry = json.dumps({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "task_id": task_id,
+        "action_type": entry.get("action_type", ""),
+        "rollback_cmd": rollback_cmd,
+        "reversible": True,
+        "status": "rolled_back",
+        "rollback_exit_code": result.returncode,
+    })
+    fd = os.open(str(registry), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    try:
+        os.write(fd, (mark_entry + "\n").encode())
+    finally:
+        os.close(fd)
+
+    if result.returncode == 0:
+        _record_outcome({"id": task_id}, tier=0, action="rollback", success=True)
+        return True, ""
+    else:
+        _record_outcome({"id": task_id}, tier=0, action="rollback", success=False)
+        return False, f"ROLLBACK_FAILED: exit {result.returncode}"
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -615,6 +729,16 @@ def _cmd_status(args) -> int:
     return 0
 
 
+def _cmd_rollback(args) -> int:
+    success, reason = execute_rollback(args.task_id)
+    if success:
+        print(f"ROLLBACK_OK: Task {args.task_id} rolled back successfully")
+        return 0
+    else:
+        print(f"ROLLBACK_FAILED: {reason}", file=sys.stderr)
+        return 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Aria self-healing coordinator — dispatch recovery tiers for failing tasks"
@@ -638,6 +762,10 @@ def main() -> None:
     p_status = sub.add_parser("status", help="Show tier selection for a task")
     p_status.add_argument("--task-id", required=True, help="Task ID")
 
+    # rollback
+    p_rollback = sub.add_parser("rollback", help="Execute rollback for a task")
+    p_rollback.add_argument("--task-id", required=True, help="Task ID to roll back")
+
     args = parser.parse_args()
 
     if args.command == "attempt":
@@ -646,6 +774,8 @@ def main() -> None:
         sys.exit(_cmd_classify(args))
     elif args.command == "status":
         sys.exit(_cmd_status(args))
+    elif args.command == "rollback":
+        sys.exit(_cmd_rollback(args))
     else:
         parser.print_help()
         sys.exit(1)
