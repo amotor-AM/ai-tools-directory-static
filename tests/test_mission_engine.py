@@ -2084,3 +2084,74 @@ class TestAdaptReanchor:
                     break
         assert found_reanchor, \
             f"Re-anchor directive not found in prompt. Calls: {captured_calls}"
+
+
+# ---------------------------------------------------------------------------
+# TestAutonomyTier — AUTO-04
+# ---------------------------------------------------------------------------
+
+
+class TestAutonomyTier:
+    """Tests that mission_engine.py create accepts --autonomy-tier and persists it."""
+
+    def test_create_default_tier_is_1(self, mission_dir):
+        """create --goal 'test' creates mission with autonomy_tier=1 (default)."""
+        r = run_me("create", "--goal", "test goal for tier check",
+                   env_override={"MISSION_DIR": str(mission_dir)})
+        assert r.returncode == 0, f"Expected exit 0. stderr={r.stderr}"
+        mission_id = extract_mission_id(r.stdout)
+        assert mission_id, f"Could not extract mission_id from: {r.stdout}"
+        mission = get_mission_file(mission_dir, mission_id)
+        assert "autonomy_tier" in mission, f"Mission missing 'autonomy_tier' field: {mission}"
+        assert mission["autonomy_tier"] == 1, \
+            f"Expected default autonomy_tier=1, got {mission['autonomy_tier']}"
+
+    def test_create_explicit_tier_2(self, mission_dir):
+        """create --goal 'test' --autonomy-tier 2 creates mission with autonomy_tier=2."""
+        r = run_me("create", "--goal", "test goal explicit tier 2",
+                   "--autonomy-tier", "2",
+                   env_override={"MISSION_DIR": str(mission_dir)})
+        assert r.returncode == 0, f"Expected exit 0. stderr={r.stderr}"
+        mission_id = extract_mission_id(r.stdout)
+        assert mission_id
+        mission = get_mission_file(mission_dir, mission_id)
+        assert mission["autonomy_tier"] == 2, \
+            f"Expected autonomy_tier=2, got {mission.get('autonomy_tier')}"
+
+    def test_create_explicit_tier_3(self, mission_dir):
+        """create --goal 'test' --autonomy-tier 3 creates mission with autonomy_tier=3."""
+        r = run_me("create", "--goal", "test goal explicit tier 3",
+                   "--autonomy-tier", "3",
+                   env_override={"MISSION_DIR": str(mission_dir)})
+        assert r.returncode == 0, f"Expected exit 0. stderr={r.stderr}"
+        mission_id = extract_mission_id(r.stdout)
+        assert mission_id
+        mission = get_mission_file(mission_dir, mission_id)
+        assert mission["autonomy_tier"] == 3, \
+            f"Expected autonomy_tier=3, got {mission.get('autonomy_tier')}"
+
+    def test_autonomy_tier_in_ledger(self, mission_dir):
+        """Created mission's ledger entry includes autonomy_tier."""
+        r = run_me("create", "--goal", "test goal for ledger tier check",
+                   "--autonomy-tier", "2",
+                   env_override={"MISSION_DIR": str(mission_dir)})
+        assert r.returncode == 0, f"Expected exit 0. stderr={r.stderr}"
+        mission_id = extract_mission_id(r.stdout)
+        assert mission_id
+        ledger = load_ledger(mission_dir)
+        assert ledger is not None, "Ledger not created"
+        entries = [e for e in ledger.get("missions", []) if e.get("id") == mission_id]
+        assert len(entries) == 1, f"Mission {mission_id} not found in ledger"
+        entry = entries[0]
+        assert "autonomy_tier" in entry, \
+            f"Ledger entry missing 'autonomy_tier': {entry}"
+        assert entry["autonomy_tier"] == 2, \
+            f"Expected autonomy_tier=2 in ledger, got {entry.get('autonomy_tier')}"
+
+    def test_invalid_tier_rejected(self, mission_dir):
+        """--autonomy-tier 5 is rejected by argparse (choices=[1,2,3])."""
+        r = run_me("create", "--goal", "test invalid tier",
+                   "--autonomy-tier", "5",
+                   env_override={"MISSION_DIR": str(mission_dir)})
+        assert r.returncode != 0, \
+            f"Expected non-zero exit for invalid tier, got {r.returncode}"

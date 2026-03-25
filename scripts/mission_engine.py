@@ -218,7 +218,7 @@ def load_ledger() -> dict:
         return {"missions": [], "updated_at": ""}
 
 
-def update_ledger(mission_id: str, goal: str, status: str, priority: int, kpi_summary: str = "") -> None:
+def update_ledger(mission_id: str, goal: str, status: str, priority: int, kpi_summary: str = "", autonomy_tier: int = 1) -> None:
     """Upsert a mission entry in ledger.json. Writes atomically."""
     _ensure_dirs()
     ledger = load_ledger()
@@ -229,6 +229,7 @@ def update_ledger(mission_id: str, goal: str, status: str, priority: int, kpi_su
         "status": status,
         "priority": priority,
         "kpi_summary": kpi_summary,
+        "autonomy_tier": autonomy_tier,
         "updated_at": now_iso(),
     }
 
@@ -423,6 +424,10 @@ def create_mission(args):
 
     auto_kpis = auto_select_kpis(args.goal)
 
+    autonomy_tier = getattr(args, "autonomy_tier", None)
+    if autonomy_tier is None:
+        autonomy_tier = 1
+
     mission = {
         "id": mission_id,
         "goal": args.goal,
@@ -435,10 +440,11 @@ def create_mission(args):
         "strategy": "",
         "stall_count": 0,
         "priority": args.priority if args.priority is not None else 3,
+        "autonomy_tier": autonomy_tier,
     }
 
     save_mission(mission, path)
-    update_ledger(mission_id, args.goal, "INBOX", mission["priority"])
+    update_ledger(mission_id, args.goal, "INBOX", mission["priority"], autonomy_tier=autonomy_tier)
 
     print(f"MISSION_CREATED: mission_{mission_id}")
     print(f"  Goal: {args.goal}")
@@ -1131,6 +1137,8 @@ def main():
     p_create.add_argument("--goal", required=True, help="High-level goal statement")
     p_create.add_argument("--priority", type=int, default=None,
                           help="Priority 1-4 (1=critical, 4=low). Default: 3")
+    p_create.add_argument("--autonomy-tier", type=int, default=1, choices=[1, 2, 3],
+                          help="Autonomy level: 1=full-auto, 2=log+proceed, 3=brief-Alex-first")
 
     # --- status ---
     p_status = sub.add_parser("status", help="Show mission status")

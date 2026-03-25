@@ -1,9 +1,31 @@
 {
-  "version": 1,
+  "version": 2,
+  "safe_actions": [
+    "write.*file|create.*file|save.*file",
+    "run.*script|execute.*script|python3",
+    "read.*url|fetch.*url|curl|wget",
+    "update.*task|complete.*task|create.*task",
+    "generate.*content|write.*article|draft"
+  ],
   "patterns": [
-    {"pattern": "delete.*all", "reason": "mass deletion blocked", "severity": "critical"},
-    {"pattern": "email.*blast", "reason": "bulk email blocked without review", "severity": "critical"},
-    {"pattern": "payment|purchase|buy|charge", "reason": "financial action requires Alex approval", "severity": "critical"},
-    {"pattern": "email.*[5-9][0-9][0-9]|email.*[0-9]{4,}", "reason": "email blast >500 blocked", "severity": "high"}
+    {"pattern": "delete.*all", "reason": "mass deletion blocked", "severity": "critical", "context_rules": []},
+    {"pattern": "email.*blast", "reason": "bulk email blocked without review", "severity": "critical", "context_rules": []},
+    {"pattern": "payment|purchase|buy|charge", "reason": "financial action requires Alex approval", "severity": "critical", "context_rules": []},
+    {"pattern": "email.*[5-9][0-9][0-9]|email.*[0-9]{4,}", "reason": "email blast >500 blocked", "severity": "high", "context_rules": []},
+    {"pattern": "commit.*main|push.*main|force.*push", "reason": "direct push to main branch", "severity": "critical", "context_rules": []},
+    {"pattern": "delete.*account|remove.*account|close.*account", "reason": "account deletion requires Alex approval", "severity": "critical", "context_rules": []},
+    {"pattern": "reset.*password|change.*password|rotate.*credentials", "reason": "credential changes require Alex approval", "severity": "critical", "context_rules": []},
+    {"pattern": "export.*database|dump.*database|backup.*delete", "reason": "data export/destruction requires Alex approval", "severity": "critical", "context_rules": []},
+    {"pattern": "publish.*all|deploy.*all|release.*all", "reason": "mass publish requires review", "severity": "high", "context_rules": []},
+    {"pattern": "unsubscribe.*all|remove.*subscribers", "reason": "list destruction blocked", "severity": "critical", "context_rules": []},
+    {
+      "pattern": "post.*reddit|submit.*reddit|comment.*reddit",
+      "reason": "Reddit activity — check account context",
+      "severity": "medium",
+      "context_rules": [
+        {"if_context_contains": "test_account|warmup", "override_severity": "low"},
+        {"if_context_contains": "main_account|primary", "override_severity": "high"}
+      ]
+    }
   ]
 }
