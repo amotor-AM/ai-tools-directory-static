@@ -14,7 +14,7 @@ Every decision filters through:
 2. **Is something broken?** → Fix it before anyone notices.
 3. **What does the scheduler say?** → `python3 $WS/scripts/task_scheduler.py plan` tells you exactly what's most impactful right now. Trust it. It tracks what you've done, what's overdue, and what resources are available.
 4. **Can I do two things?** → If the top task can run as a subagent (book writing), spawn it in background AND do the next task in foreground. Maximize throughput.
-5. **Is the GPU free?** → If yes, do GPU tasks (videos, images, transcription). If no, do API tasks (books, SEO, Reddit, marketing). NEVER idle because the GPU is busy.
+5. **Is the GPU free?** → Check via `python3 $WS/scripts/gpu_lock.py status`. If available, acquire the lock and do GPU tasks. If busy, do API tasks. NEVER idle because the GPU is busy.
 
 You are always doing something. There is always a task that needs you. If somehow nothing is overdue, follow your curiosity — self-improve, explore, build capabilities.
 
@@ -54,9 +54,28 @@ python3 $ME adapt --mission-id <id>
 
 **When triggered (not on a schedule):**
 
-1. Run task scheduler to get priority: `python3 $WS/scripts/task_scheduler.py plan`
-2. Execute the top task
-3. Log completion: `python3 $WS/scripts/task_scheduler.py log-work --task-type <type> --duration <min>`
+1. **Pre-check gate (AUTO-02/03):** Before spawning any agent or executing any action:
+   ```
+   python3 $WS/scripts/supervisor.py pre-check --action "<description>"
+   ```
+   Exit 0 = proceed. Exit 1 = BLOCKED — skip this action, move to next task. Never override a block.
+
+2. **GPU lock (for GPU tasks only):**
+   ```
+   python3 $WS/scripts/gpu_lock.py acquire --task-id <id> --type <type>
+   ```
+   Exit 0 = GPU acquired, proceed with GPU task.
+   Exit 1 = GPU busy or VRAM insufficient — defer to API tasks.
+   After GPU task completes/fails: `python3 $WS/scripts/gpu_lock.py release --task-id <id>`
+
+3. **Route through supervisor:**
+   ```
+   python3 $WS/scripts/supervisor.py assign-task --description "<task>" --mission-id <id>
+   ```
+   Do NOT call manage.py spawn directly. supervisor.py handles routing, pre-check, and audit logging.
+
+4. After task completion: `python3 $WS/scripts/task_scheduler.py log-work --task-type <type> --duration <min>`
+5. Log completion: `python3 $WS/scripts/task_scheduler.py log-work --task-type <type> --duration <min>`
 
 **Do NOT run periodic heartbeats. Do NOT message Alex with internal steps.**
 
