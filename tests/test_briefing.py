@@ -231,7 +231,7 @@ class TestBriefingGenerate:
         assert any("Stripe" in item or "API" in item or "Input needed" in item for item in result.action_items)
 
     def test_empty_state_returns_none(self, tmp_path, monkeypatch):
-        """generate() returns None when no tasks, no missions, no escalations."""
+        """generate() returns None when no tasks, no missions, no escalations, no violations."""
         task_dir = tmp_path / "state"
         task_dir.mkdir(parents=True)
         missions_dir = make_ledger(tmp_path, [])
@@ -241,6 +241,8 @@ class TestBriefingGenerate:
         monkeypatch.setenv("ARIA_TASK_DIR", str(task_dir))
         monkeypatch.setenv("MISSIONS_DIR", str(missions_dir))
         monkeypatch.setenv("BRIEFING_STATE_PATH", str(state_path))
+        # Isolate from real supervisor.jsonl — point to nonexistent path
+        monkeypatch.setenv("SUPERVISOR_AUDIT_LOG", str(tmp_path / "supervisor.jsonl"))
 
         if "briefing" in sys.modules:
             del sys.modules["briefing"]
@@ -695,7 +697,7 @@ class TestEmergencyAlert:
 class TestMinimumContent:
 
     def test_empty_briefing_skipped(self, tmp_path, monkeypatch):
-        """No done, no active, no action_items => send() marks sent but does NOT call Telegram."""
+        """No done, no active, no action_items, no violations => send() marks sent but does NOT call Telegram."""
         task_dir = tmp_path / "state"
         task_dir.mkdir(parents=True)
         missions_dir = make_ledger(tmp_path, [])
@@ -705,6 +707,8 @@ class TestMinimumContent:
         monkeypatch.setenv("ARIA_TASK_DIR", str(task_dir))
         monkeypatch.setenv("MISSIONS_DIR", str(missions_dir))
         monkeypatch.setenv("BRIEFING_STATE_PATH", str(state_path))
+        # Isolate from real supervisor.jsonl — point to nonexistent path
+        monkeypatch.setenv("SUPERVISOR_AUDIT_LOG", str(tmp_path / "supervisor.jsonl"))
 
         if "briefing" in sys.modules:
             del sys.modules["briefing"]
@@ -754,3 +758,301 @@ class TestMinimumContent:
                     briefing.send()
 
         assert mock_requests.post.called
+
+
+# ---------------------------------------------------------------------------
+# TestGuardrailViolations  (AUTO-07)
+# ---------------------------------------------------------------------------
+
+class TestGuardrailViolations:
+    """Tests for _read_todays_violations() and guardrail_violations integration."""
+
+    def _write_supervisor_log(self, path, entries):
+        """Write supervisor.jsonl entries to path."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = []
+        for entry in entries:
+            lines.append(json.dumps(entry))
+        path.write_text("\n".join(lines) + "\n" if lines else "")
+
+    def test_empty_no_file(self, tmp_path, monkeypatch):
+        """_read_todays_violations returns [] when supervisor.jsonl doesn't exist."""
+        monkeypatch.setenv("SUPERVISOR_AUDIT_LOG", str(tmp_path / "nonexistent.jsonl"))
+        if "briefing" in sys.modules:
+            del sys.modules["briefing"]
+        import briefing
+        result = briefing._read_todays_violations()
+        assert result == []
+
+    def test_returns_blocked_entries_for_today(self, tmp_path, monkeypatch):
+        """Returns exactly the BLOCKED entries with today's date."""
+        audit_path = tmp_path / "supervisor.jsonl"
+        today = "2026-03-24"
+        entries = [
+            {"ts": f"{today}T10:00:00+00:00", "op": "pre_check", "data": {"action": "buy domain", "result": "BLOCKED", "reason": "financial action", "severity": "critical", "pattern": "buy"}},
+            {"ts": f"{today}T11:00:00+00:00", "op": "pre_check", "data": {"action": "send email blast", "result": "BLOCKED", "reason": "mass email", "severity": "high", "pattern": "email"}},
+            {"ts": f"{today}T12:00:00+00:00", "op": "pre_check", "data": {"action": "post article", "result": "ALLOWED", "dry_run": False, "dry_run_matches": []}},
+            {"ts": f"{today}T09:00:00+00:00", "op": "pre_check", "data": {"action": "delete all files", "result": "BLOCKED", "reason": "mass delete", "severity": "critical", "pattern": "delete"}},
+            {"ts": f"{today}T08:00:00+00:00", "op": "pre_check", "data": {"action": "check missions", "result": "ALLOWED", "dry_run": False, "dry_run_matches": []}},
+        ]
+        self._write_supervisor_log(audit_path, entries)
+        monkeypatch.setenv("SUPERVISOR_AUDIT_LOG", str(audit_path))
+        if "briefing" in sys.modules:
+            del sys.modules["briefing"]
+        import briefing
+
+        pacific = ZoneInfo("America/Los_Angeles")
+        fake_now = datetime(2026, 3, 24, 20, 30, tzinfo=pacific)
+        with patch.object(briefing, "now_pacific", return_value=fake_now):
+            result = briefing._read_todays_violations()
+
+        assert len(result) == 3
+        assert all("Blocked:" in v for v in result)
+        assert any("buy domain" in v for v in result)
+        assert any("send email blast" in v for v in result)
+        assert any("delete all files" in v for v in result)
+
+    def test_date_filter_excludes_yesterday(self, tmp_path, monkeypatch):
+        """Yesterday's BLOCKED entries are not included."""
+        audit_path = tmp_path / "supervisor.jsonl"
+        entries = [
+            {"ts": "2026-03-23T22:00:00+00:00", "op": "pre_check", "data": {"action": "old blocked action", "result": "BLOCKED", "reason": "old reason", "severity": "critical", "pattern": "old"}},
+            {"ts": "2026-03-24T10:00:00+00:00", "op": "pre_check", "data": {"action": "today blocked action", "result": "BLOCKED", "reason": "today reason", "severity": "high", "pattern": "today"}},
+        ]
+        self._write_supervisor_log(audit_path, entries)
+        monkeypatch.setenv("SUPERVISOR_AUDIT_LOG", str(audit_path))
+        if "briefing" in sys.modules:
+            del sys.modules["briefing"]
+        import briefing
+
+        pacific = ZoneInfo("America/Los_Angeles")
+        fake_now = datetime(2026, 3, 24, 20, 30, tzinfo=pacific)
+        with patch.object(briefing, "now_pacific", return_value=fake_now):
+            result = briefing._read_todays_violations()
+
+        assert len(result) == 1
+        assert "today blocked action" in result[0]
+        assert not any("old blocked action" in v for v in result)
+
+    def test_corrupt_line_skipped(self, tmp_path, monkeypatch):
+        """Malformed JSON lines are skipped, valid lines parsed correctly."""
+        audit_path = tmp_path / "supervisor.jsonl"
+        today = "2026-03-24"
+        # Write mix of valid and invalid lines
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text(
+            '{"ts": "' + today + 'T10:00:00+00:00", "op": "pre_check", "data": {"action": "buy domain", "result": "BLOCKED", "reason": "financial", "severity": "critical", "pattern": "buy"}}\n'
+            'NOT VALID JSON {{{\n'
+            '{"ts": "' + today + 'T11:00:00+00:00", "op": "pre_check", "data": {"action": "mass delete", "result": "BLOCKED", "reason": "destructive", "severity": "critical", "pattern": "delete"}}\n'
+        )
+        monkeypatch.setenv("SUPERVISOR_AUDIT_LOG", str(audit_path))
+        if "briefing" in sys.modules:
+            del sys.modules["briefing"]
+        import briefing
+
+        pacific = ZoneInfo("America/Los_Angeles")
+        fake_now = datetime(2026, 3, 24, 20, 30, tzinfo=pacific)
+        with patch.object(briefing, "now_pacific", return_value=fake_now):
+            result = briefing._read_todays_violations()
+
+        assert len(result) == 2
+
+    def test_guardrail_violations_field_on_daily_briefing(self):
+        """DailyBriefing(guardrail_violations=[...]) validates OK."""
+        from output_schema import DailyBriefing
+        b = DailyBriefing(guardrail_violations=["Blocked: purchase domain (financial action)"])
+        assert len(b.guardrail_violations) == 1
+        assert "purchase domain" in b.guardrail_violations[0]
+
+    def test_guardrail_violations_default_empty(self):
+        """DailyBriefing() without guardrail_violations defaults to [] (backward compat)."""
+        from output_schema import DailyBriefing
+        b = DailyBriefing()
+        assert b.guardrail_violations == []
+
+    def test_format_telegram_renders_blocked_section(self):
+        """format_for_telegram renders 'Blocked today' section when violations exist."""
+        if "briefing" in sys.modules:
+            del sys.modules["briefing"]
+        import briefing
+        from output_schema import DailyBriefing
+        b = DailyBriefing(
+            done=["Published article"],
+            guardrail_violations=["Blocked: buy domain (financial action)"]
+        )
+        text = briefing.format_for_telegram(b)
+        assert "Blocked today" in text
+        assert "buy domain" in text
+
+    def test_generate_includes_violations(self, tmp_path, monkeypatch):
+        """generate() populates guardrail_violations from supervisor.jsonl."""
+        audit_path = tmp_path / "supervisor.jsonl"
+        today = "2026-03-24"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text(
+            '{"ts": "' + today + 'T10:00:00+00:00", "op": "pre_check", "data": {"action": "send mass email", "result": "BLOCKED", "reason": "mass email", "severity": "high", "pattern": "email"}}\n'
+        )
+        monkeypatch.setenv("SUPERVISOR_AUDIT_LOG", str(audit_path))
+
+        task_dir = make_task(tmp_path, "done_task", "Article published", "DONE", completed_at=f"{today}T09:00:00")
+        missions_dir = make_ledger(tmp_path, [])
+        state_path = tmp_path / "briefing-state.json"
+        write_briefing_state(state_path, {})
+
+        monkeypatch.setenv("ARIA_TASK_DIR", str(task_dir))
+        monkeypatch.setenv("MISSIONS_DIR", str(missions_dir))
+        monkeypatch.setenv("BRIEFING_STATE_PATH", str(state_path))
+
+        if "briefing" in sys.modules:
+            del sys.modules["briefing"]
+        import briefing
+
+        pacific = ZoneInfo("America/Los_Angeles")
+        fake_now = datetime(2026, 3, 24, 20, 30, tzinfo=pacific)
+        with patch.object(briefing, "now_pacific", return_value=fake_now):
+            result = briefing.generate()
+
+        assert result is not None
+        assert len(result.guardrail_violations) == 1
+        assert "send mass email" in result.guardrail_violations[0]
+
+    def test_violations_capped_at_5(self, tmp_path, monkeypatch):
+        """If 10 violations today, only top 5 shown in briefing."""
+        audit_path = tmp_path / "supervisor.jsonl"
+        today = "2026-03-24"
+        entries = []
+        for i in range(10):
+            entries.append({
+                "ts": f"{today}T{10+i:02d}:00:00+00:00",
+                "op": "pre_check",
+                "data": {"action": f"blocked action {i}", "result": "BLOCKED", "reason": f"reason {i}", "severity": "high", "pattern": f"pat{i}"}
+            })
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+        monkeypatch.setenv("SUPERVISOR_AUDIT_LOG", str(audit_path))
+
+        if "briefing" in sys.modules:
+            del sys.modules["briefing"]
+        import briefing
+
+        pacific = ZoneInfo("America/Los_Angeles")
+        fake_now = datetime(2026, 3, 24, 20, 30, tzinfo=pacific)
+        with patch.object(briefing, "now_pacific", return_value=fake_now):
+            result = briefing._read_todays_violations()
+
+        assert len(result) == 5
+
+    def test_violations_only_briefing_not_none(self, tmp_path, monkeypatch):
+        """generate() returns a non-None briefing when there are violations but no done/active/actions."""
+        audit_path = tmp_path / "supervisor.jsonl"
+        today = "2026-03-24"
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_path.write_text(
+            '{"ts": "' + today + 'T10:00:00+00:00", "op": "pre_check", "data": {"action": "buy API credits", "result": "BLOCKED", "reason": "financial", "severity": "critical", "pattern": "buy"}}\n'
+        )
+        monkeypatch.setenv("SUPERVISOR_AUDIT_LOG", str(audit_path))
+
+        task_dir = tmp_path / "state"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        missions_dir = make_ledger(tmp_path, [])
+        state_path = tmp_path / "briefing-state.json"
+        write_briefing_state(state_path, {})
+
+        monkeypatch.setenv("ARIA_TASK_DIR", str(task_dir))
+        monkeypatch.setenv("MISSIONS_DIR", str(missions_dir))
+        monkeypatch.setenv("BRIEFING_STATE_PATH", str(state_path))
+
+        if "briefing" in sys.modules:
+            del sys.modules["briefing"]
+        import briefing
+
+        pacific = ZoneInfo("America/Los_Angeles")
+        fake_now = datetime(2026, 3, 24, 20, 30, tzinfo=pacific)
+        with patch.object(briefing, "now_pacific", return_value=fake_now):
+            result = briefing.generate()
+
+        assert result is not None
+        assert len(result.guardrail_violations) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestBriefingSendAudit  (AUTO-05)
+# ---------------------------------------------------------------------------
+
+class TestBriefingSendAudit:
+    """Tests for log_action() call after successful briefing send."""
+
+    def test_send_calls_log_action(self, tmp_path, monkeypatch):
+        """After successful send, log_action('briefing_sent', ...) is called."""
+        task_dir = make_task(tmp_path, "done_audit", "Published article", "DONE", completed_at="2026-03-24T09:00:00")
+        missions_dir = make_ledger(tmp_path, [])
+        state_path = tmp_path / "briefing-state.json"
+        write_briefing_state(state_path, {"last_sent_date": "2026-03-23"})
+
+        monkeypatch.setenv("ARIA_TASK_DIR", str(task_dir))
+        monkeypatch.setenv("MISSIONS_DIR", str(missions_dir))
+        monkeypatch.setenv("BRIEFING_STATE_PATH", str(state_path))
+
+        if "briefing" in sys.modules:
+            del sys.modules["briefing"]
+        import briefing
+
+        pacific = ZoneInfo("America/Los_Angeles")
+        fake_now = datetime(2026, 3, 24, 20, 30, tzinfo=pacific)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+
+        log_action_calls = []
+
+        def mock_log_action(op, data):
+            log_action_calls.append((op, data))
+
+        with patch.object(briefing, "now_pacific", return_value=fake_now):
+            with patch("briefing.get_bot_token", return_value="test-token"):
+                with patch("briefing.requests") as mock_requests:
+                    with patch.object(briefing, "log_action", mock_log_action):
+                        mock_requests.post.return_value = mock_resp
+                        briefing.send()
+
+        assert any(op == "briefing_sent" for op, data in log_action_calls), \
+            f"log_action('briefing_sent', ...) not called; calls were: {log_action_calls}"
+
+    def test_log_action_includes_metadata(self, tmp_path, monkeypatch):
+        """log_action call includes violations_count, done_count, active_count."""
+        task_dir = make_task(tmp_path, "done_meta", "Video uploaded", "DONE", completed_at="2026-03-24T08:00:00")
+        missions_dir = make_ledger(tmp_path, [])
+        state_path = tmp_path / "briefing-state.json"
+        write_briefing_state(state_path, {"last_sent_date": "2026-03-23"})
+
+        monkeypatch.setenv("ARIA_TASK_DIR", str(task_dir))
+        monkeypatch.setenv("MISSIONS_DIR", str(missions_dir))
+        monkeypatch.setenv("BRIEFING_STATE_PATH", str(state_path))
+        monkeypatch.setenv("SUPERVISOR_AUDIT_LOG", str(tmp_path / "supervisor.jsonl"))
+
+        if "briefing" in sys.modules:
+            del sys.modules["briefing"]
+        import briefing
+
+        pacific = ZoneInfo("America/Los_Angeles")
+        fake_now = datetime(2026, 3, 24, 20, 30, tzinfo=pacific)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+
+        log_action_calls = []
+
+        def mock_log_action(op, data):
+            log_action_calls.append((op, data))
+
+        with patch.object(briefing, "now_pacific", return_value=fake_now):
+            with patch("briefing.get_bot_token", return_value="test-token"):
+                with patch("briefing.requests") as mock_requests:
+                    with patch.object(briefing, "log_action", mock_log_action):
+                        mock_requests.post.return_value = mock_resp
+                        briefing.send()
+
+        briefing_sent_calls = [(op, data) for op, data in log_action_calls if op == "briefing_sent"]
+        assert len(briefing_sent_calls) >= 1
+        _, data = briefing_sent_calls[0]
+        assert "violations_count" in data
+        assert "done_count" in data
+        assert "active_count" in data

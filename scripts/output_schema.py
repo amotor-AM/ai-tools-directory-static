@@ -71,6 +71,7 @@ class DailyBriefing(BaseModel):
     flag: Optional[str] = None
     action_items: List[str] = Field(default_factory=list)  # OUTP-07: ACTION NEEDED items
     delta_summary: Optional[str] = None                    # OUTP-06: momentum string
+    guardrail_violations: List[str] = Field(default_factory=list)  # AUTO-07: blocked actions today
 
     @model_validator(mode="after")
     def enforce_limits(self):
@@ -92,6 +93,9 @@ class DailyBriefing(BaseModel):
                 raise ValueError(f"action_items item exceeds 80 chars: {item!r}")
         if self.delta_summary and len(self.delta_summary) > 120:
             raise ValueError("delta_summary exceeds 120 chars")
+        # Truncate violations to 5 — FYI only, don't crash the briefing
+        if len(self.guardrail_violations) > 5:
+            self.guardrail_violations = self.guardrail_violations[:5]
         return self
 
 

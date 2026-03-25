@@ -33,6 +33,16 @@ from zoneinfo import ZoneInfo
 import requests
 
 # ---------------------------------------------------------------------------
+# Audit log_action import (AUTO-05) — graceful fallback if supervisor unavailable
+# ---------------------------------------------------------------------------
+
+try:
+    from supervisor import log_action
+except ImportError:
+    def log_action(op, data):
+        pass  # Graceful fallback if supervisor.py not available
+
+# ---------------------------------------------------------------------------
 # Path setup — add file_lock to sys.path
 # ---------------------------------------------------------------------------
 
@@ -116,6 +126,36 @@ def get_bot_token() -> str:
 # ---------------------------------------------------------------------------
 # Core logic
 # ---------------------------------------------------------------------------
+
+def _read_todays_violations() -> list:
+    """Read today's BLOCKED entries from supervisor.jsonl, formatted for briefing.
+
+    Returns list of human-readable strings like "Blocked: {action} ({reason})".
+    Capped at 5 entries to prevent briefing overflow (AUTO-07).
+    """
+    today = now_pacific().date().isoformat()
+    audit_path = Path(os.environ.get(
+        "SUPERVISOR_AUDIT_LOG",
+        "/home/alex/.openclaw/workspace/memory/audit/supervisor.jsonl"
+    ))
+    if not audit_path.exists():
+        return []
+    violations = []
+    for line in audit_path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+            if (record.get("op") == "pre_check" and
+                    record.get("data", {}).get("result") == "BLOCKED" and
+                    record.get("ts", "").startswith(today)):
+                action = record["data"].get("action", "unknown")[:60]
+                reason = record["data"].get("reason", "")[:40]
+                violations.append(f"Blocked: {action} ({reason})")
+        except json.JSONDecodeError:
+            continue
+    return violations[:5]  # Cap at 5 to prevent briefing overflow
+
 
 def should_send() -> bool:
     """Return True if in 8-10 PM Pacific window and not yet sent today."""
@@ -260,6 +300,12 @@ def format_for_telegram(briefing: DailyBriefing) -> str:
         lines.append("")
         lines.append(f"FYI: {briefing.flag}")
 
+    if briefing.guardrail_violations:
+        lines.append("")
+        lines.append("*Blocked today*")
+        for item in briefing.guardrail_violations:
+            lines.append(f"\u2022 {item}")
+
     text = "\n".join(lines)
     return truncate_with_link(text)
 
@@ -270,9 +316,10 @@ def generate() -> "DailyBriefing | None":
     Returns None if no content (empty briefing should be skipped).
     """
     data = collect_briefing_data(TASKS_DIR, MISSIONS_DIR)
+    violations = _read_todays_violations()  # AUTO-07
 
-    # Minimum content gate: skip if nothing to report
-    if not data["done"] and not data["active"] and not data["action_items"]:
+    # Minimum content gate: skip if nothing to report (violations count as content)
+    if not data["done"] and not data["active"] and not data["action_items"] and not violations:
         return None
 
     state = load_json(BRIEFING_STATE)
@@ -284,6 +331,7 @@ def generate() -> "DailyBriefing | None":
         tomorrow=data["tomorrow"],
         action_items=data["action_items"],
         delta_summary=delta_summary,
+        guardrail_violations=violations,
     )
 
 
@@ -357,6 +405,12 @@ def send() -> int:
         success = send_telegram(formatted)
         if success:
             mark_sent(done_count=len(briefing_obj.done))
+            log_action("briefing_sent", {
+                "type": "daily_brief",
+                "violations_count": len(briefing_obj.guardrail_violations),
+                "done_count": len(briefing_obj.done),
+                "active_count": len(briefing_obj.active),
+            })
             print("SENT: Daily briefing delivered")
             return 0
         else:
