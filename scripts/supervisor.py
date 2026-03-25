@@ -663,6 +663,31 @@ def validate_task(task_id: str, result_json: str) -> int:
             [sys.executable, TM_PATH, "complete", task_id, "--summary", summary_for_tm],
             check=False,
         )
+
+        # AUTO-09: Auto-register rollback for reversible action types
+        try:
+            from heal import register_rollback, REVERSIBLE_ACTION_TYPES  # noqa: E402
+            # Get action_type from task metadata
+            action_type = task.get("action_type", task.get("context", {}).get("action_type", ""))
+            scripts_dir = str(Path(__file__).resolve().parent)
+
+            if action_type in REVERSIBLE_ACTION_TYPES:
+                # Build rollback command from template
+                rollback_cmd = REVERSIBLE_ACTION_TYPES[action_type].format(
+                    scripts_dir=scripts_dir,
+                    post_id=task.get("context", {}).get("post_id", "UNKNOWN"),
+                    task_id=task_id,
+                )
+                register_rollback(task_id, action_type, rollback_cmd, reversible=True)
+                _audit("rollback_registered", {"task_id": task_id, "action_type": action_type})
+            elif action_type:
+                # Non-reversible side-effect actions — register as not rollback-able
+                NON_REVERSIBLE_TYPES = {"email_sent", "reddit_post", "reddit_comment", "tweet", "sms"}
+                if action_type in NON_REVERSIBLE_TYPES:
+                    register_rollback(task_id, action_type, "", reversible=False)
+                # Read-only/analysis types (research, analysis, read, generate) — no registration needed
+        except ImportError:
+            pass  # heal.py not available — skip rollback registration
     else:
         subprocess.run(
             [sys.executable, HEAL_PATH, "attempt", "--task-id", task_id, "--auto"],
