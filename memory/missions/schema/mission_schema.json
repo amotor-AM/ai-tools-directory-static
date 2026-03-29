@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Aria Mission",
+  "description": "Schema for mission state files. Each mission is a persistent goal tracked across heartbeats.",
+  "type": "object",
+  "required": ["id", "goal", "original_goal", "status", "created_at", "kpis", "tasks"],
+  "properties": {
+    "id": {"type": "string", "description": "Unique mission identifier"},
+    "goal": {"type": "string", "description": "Current active goal (may adapt over time)"},
+    "original_goal": {"type": "string", "description": "IMMUTABLE — written once at intake, never modified"},
+    "status": {"type": "string", "enum": ["INBOX", "ACTIVE", "ADAPTING", "STALLED", "COMPLETED"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "kpis": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["metric", "target", "current"],
+        "properties": {
+          "metric": {"type": "string"},
+          "target": {},
+          "current": {},
+          "met": {"type": "boolean", "default": false}
+        }
+      }
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["task_id", "goal", "type", "status"],
+        "properties": {
+          "task_id": {"type": "string"},
+          "goal": {"type": "string"},
+          "type": {"type": "string", "enum": ["one-time", "recurring"]},
+          "cadence": {"type": ["string", "null"], "description": "cron expression for recurring tasks"},
+          "status": {"type": "string"},
+          "requires_gpu": {"type": "boolean", "default": false}
+        }
+      }
+    },
+    "strategy": {"type": "string", "description": "Current execution strategy, may evolve"},
+    "stall_count": {"type": "integer", "default": 0, "description": "Heartbeats with no progress"},
+    "priority": {"type": "integer", "default": 3, "minimum": 1, "maximum": 4}
+  },
+  "additionalProperties": false
+}
