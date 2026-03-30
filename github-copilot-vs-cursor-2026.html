@@ -615,61 +615,61 @@
             <h2>Frequently Asked Questions</h2>
 
             <div class="faq-item">
-                <h3>1. Is Cursor worth the extra $10/month over GitHub Copilot?</h3>
+                <h3 id="faq-is-cursor-worth-the-extra-10month-over-github-copilot">1. Is Cursor worth the extra $10/month over GitHub Copilot?</h3>
                 <p>It depends on your workflow. For developers working in large codebases with frequent multi-file refactors, yes—Cursor's context awareness (80% vs 60% helpful per Reddit) justifies the cost. For standard web development with single-file edits, no—Copilot's $10/month offers better value.</p>
                 <p><strong>Break-even test:</strong> If Cursor's better context saves you 10+ minutes per month, it pays for itself. In my testing, complex refactoring tasks took 30-45 minutes less with Cursor. Simple feature work showed negligible difference.</p>
             </div>
 
             <div class="faq-item">
-                <h3>2. Can I use GitHub Copilot in Cursor?</h3>
+                <h3 id="faq-can-i-use-github-copilot-in-cursor">2. Can I use GitHub Copilot in Cursor?</h3>
                 <p>No, you can't use GitHub Copilot inside Cursor IDE. Cursor has its own AI engine and doesn't support third-party AI plugins. However, you can use both tools by running Copilot in a different IDE (like VS Code or JetBrains) and Cursor separately.</p>
             </div>
 
             <div class="faq-item">
-                <h3>3. Which has better autocomplete: Cursor or GitHub Copilot?</h3>
+                <h3 id="faq-which-has-better-autocomplete-cursor-or-github-copilot">3. Which has better autocomplete: Cursor or GitHub Copilot?</h3>
                 <p>Cursor has better autocomplete according to Reddit consensus ("autocomplete and context awareness is much better"). This is due to full codebase indexing—Cursor knows your internal types, APIs, and patterns. Copilot's autocomplete is more generic but more reliable.</p>
                 <p><strong>Real-world difference:</strong> Cursor suggests project-specific code patterns. Copilot suggests standard library usage. For greenfield projects, little difference. For mature codebases, Cursor wins.</p>
             </div>
 
             <div class="faq-item">
-                <h3>4. Does GitHub Copilot work in JetBrains IDEs?</h3>
+                <h3 id="faq-does-github-copilot-work-in-jetbrains-ides">4. Does GitHub Copilot work in JetBrains IDEs?</h3>
                 <p>Yes, GitHub Copilot has official plugins for all major JetBrains IDEs: IntelliJ IDEA, PyCharm, WebStorm, PhpStorm, Rider, GoLand, RubyMine, CLion, and DataGrip. Install from the JetBrains Marketplace. This is a major advantage over Cursor, which only works in its own VS Code fork.</p>
             </div>
 
             <div class="faq-item">
-                <h3>5. Can Cursor integrate with GitHub?</h3>
+                <h3 id="faq-can-cursor-integrate-with-github">5. Can Cursor integrate with GitHub?</h3>
                 <p>Cursor can use GitHub repositories (clone, commit, push/pull), but it lacks GitHub-specific AI features like PR description generation, code review assistance, or GitHub.com integration. If your workflow relies heavily on GitHub features, Copilot's ecosystem integration is stronger.</p>
             </div>
 
             <div class="faq-item">
-                <h3>6. Which is better for large codebases?</h3>
+                <h3 id="faq-which-is-better-for-large-codebases">6. Which is better for large codebases?</h3>
                 <p>Cursor is better for large codebases due to full codebase indexing. It understands project structure, internal APIs, and cross-file relationships. Copilot's ~8K token context window limits it to recently opened files.</p>
                 <p><strong>Reddit data:</strong> "Cursor 80% helpful, Copilot 60% helpful." That 20-point gap comes primarily from context awareness in large projects.</p>
             </div>
 
             <div class="faq-item">
-                <h3>7. Is Cursor's multi-file editing better than Copilot?</h3>
+                <h3 id="faq-is-cursors-multi-file-editing-better-than-copilot">7. Is Cursor's multi-file editing better than Copilot?</h3>
                 <p>Mixed results. Cursor Composer is more powerful (handles complex refactors across many files), but Copilot Edit mode is more reliable (fewer unexpected changes). Reddit reports: "3 prompts with Copilot Edit done, vs 3 tries with Cursor gave up" (Feb 2025). Both have improved since then.</p>
                 <p><strong>My testing:</strong> For 2-3 file changes, Copilot Edit more predictable. For 5+ files, Cursor Composer handles complexity better (but requires careful review).</p>
             </div>
 
             <div class="faq-item">
-                <h3>8. Can I use both tools simultaneously?</h3>
+                <h3 id="faq-can-i-use-both-tools-simultaneously">8. Can I use both tools simultaneously?</h3>
                 <p>Yes, but not in the same IDE. You could use Copilot in VS Code and Cursor separately, or Copilot in JetBrains and Cursor for VS Code projects. Total cost: $30/month. Some developers do this for "best of both worlds"—Cursor for complex work, Copilot for quick edits.</p>
             </div>
 
             <div class="faq-item">
-                <h3>9. Which has better context awareness?</h3>
+                <h3 id="faq-which-has-better-context-awareness">9. Which has better context awareness?</h3>
                 <p>Cursor has superior context awareness. It indexes your entire codebase (not just open files), understands project structure, and knows internal patterns. Reddit consensus: "80% helpful vs 60% helpful." Copilot improved context retrieval in Feb 2026, but still limited by plugin architecture.</p>
             </div>
 
             <div class="faq-item">
-                <h3>10. Is GitHub Copilot more reliable than Cursor?</h3>
+                <h3 id="faq-is-github-copilot-more-reliable-than-cursor">10. Is GitHub Copilot more reliable than Cursor?</h3>
                 <p>Yes, according to multiple Reddit reports. Copilot is "more polished and reliable" with Microsoft/GitHub backing, thorough testing, and predictable releases. Cursor ships features faster but has occasional bugs. For production teams, Copilot's stability is valuable. For individual developers, Cursor's innovation may be worth minor instability.</p>
             </div>
 
             <div class="faq-item">
-                <h3>11. Which is better for teams?</h3>
+                <h3 id="faq-which-is-better-for-teams">11. Which is better for teams?</h3>
                 <p>Depends on team structure:</p>
                 <ul>
                     <li><strong>Cursor Teams ($40/user):</strong> Shared codebase indexing means new team members are productive immediately. Worth it for teams with high turnover or frequent onboarding.</li>
@@ -679,7 +679,7 @@
             </div>
 
             <div class="faq-item">
-                <h3>12. Can I use Cursor if I prefer IntelliJ?</h3>
+                <h3 id="faq-can-i-use-cursor-if-i-prefer-intellij">12. Can I use Cursor if I prefer IntelliJ?</h3>
                 <p>No, Cursor only works as a standalone VS Code fork. If you're an IntelliJ (or any JetBrains) user, you'd need to switch your entire IDE to Cursor—meaning relearn keybindings, reconfigure plugins, and reset muscle memory. For JetBrains users, GitHub Copilot is the only AI assistant option that doesn't require switching editors.</p>
             </div>
         </div>

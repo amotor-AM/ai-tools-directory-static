@@ -624,84 +624,84 @@
 
     <div class="faq">
         <div class="faq-item">
-            <div class="faq-question">1. Is Claude Pro worth it for casual users who only use AI a few times per week?</div>
+            <div class="faq-question" id="faq-is-claude-pro-worth-it-for-casual-users-who-only-use-ai-a-few-times-per-week">1. Is Claude Pro worth it for casual users who only use AI a few times per week?</div>
             <div class="faq-answer">
                 <p>No. If you're using Claude fewer than 15-20 times per week, the Free plan provides adequate access. Pro makes sense when you're a daily power user who needs more capacity, access to Opus 4.6, or Extended Thinking for complex problems. Save your $20/month unless you consistently hit Free tier limits.</p>
             </div>
         </div>
 
         <div class="faq-item">
-            <div class="faq-question">2. How quickly will I hit Claude Pro usage limits as a developer?</div>
+            <div class="faq-question" id="faq-how-quickly-will-i-hit-claude-pro-usage-limits-as-a-developer">2. How quickly will I hit Claude Pro usage limits as a developer?</div>
             <div class="faq-answer">
                 <p>Active developers typically hit Pro limits within 2-7 days of full-time coding work. Pro provides ~45 messages per 5-hour window (200-216 per day), but coding sessions with Claude Code burn through limits faster due to multi-file operations, large context windows, and tool chaining. If you code 6+ hours daily, expect to hit limits within the first week and consider Max 5x instead.</p>
             </div>
         </div>
 
         <div class="faq-item">
-            <div class="faq-question">3. What's the difference between Claude Pro and Claude Max?</div>
+            <div class="faq-question" id="faq-whats-the-difference-between-claude-pro-and-claude-max">3. What's the difference between Claude Pro and Claude Max?</div>
             <div class="faq-answer">
                 <p>Claude Max offers 5× (at $100/mo) or 20× (at $200/mo) the usage capacity of Pro, plus priority access during peak times, higher output token limits, and early access to new features. The features are identical—Max simply removes the usage ceiling that makes Pro frustrating for full-time professional use. Think of Pro as "burst usage" and Max as "sustained usage."</p>
             </div>
         </div>
 
         <div class="faq-item">
-            <div class="faq-question">4. Can I use Claude Pro for commercial work and client projects?</div>
+            <div class="faq-question" id="faq-can-i-use-claude-pro-for-commercial-work-and-client-projects">4. Can I use Claude Pro for commercial work and client projects?</div>
             <div class="faq-answer">
                 <p>Yes. Claude Pro's terms of service allow commercial use. Many freelancers and agencies use Claude Pro/Max for client work including code generation, content writing, and research. However, always review output for accuracy and don't share confidential client information without proper data agreements. For enterprise use with enhanced security and compliance, consider Claude Team or Enterprise plans.</p>
             </div>
         </div>
 
         <div class="faq-item">
-            <div class="faq-question">5. Is Extended Thinking worth using on Claude Pro given it uses more tokens?</div>
+            <div class="faq-question" id="faq-is-extended-thinking-worth-using-on-claude-pro-given-it-uses-more-tokens">5. Is Extended Thinking worth using on Claude Pro given it uses more tokens?</div>
             <div class="faq-answer">
                 <p>Extended Thinking is worth using selectively for complex problems where understanding Claude's reasoning process matters—architectural decisions, algorithm optimization, strategic analysis, and complex debugging. Skip it for simple questions, straightforward code generation, or repetitive tasks. A single Extended Thinking session can consume 3-5× more tokens than a standard response, accelerating how quickly you hit daily limits. I reserve it for ~10-15% of my interactions where deep reasoning is valuable.</p>
             </div>
         </div>
 
         <div class="faq-item">
-            <div class="faq-question">6. Should I get Claude Pro or ChatGPT Plus for coding?</div>
+            <div class="faq-question" id="faq-should-i-get-claude-pro-or-chatgpt-plus-for-coding">6. Should I get Claude Pro or ChatGPT Plus for coding?</div>
             <div class="faq-answer">
                 <p>Get Claude Pro for coding. Claude consistently outperforms ChatGPT on coding benchmarks (95% vs 85% functional accuracy) and excels at multi-file refactoring, codebase analysis, and complex debugging. Claude Opus 4.6 scores 80.9% on SWE-bench Verified compared to GPT-4's lower scores. However, ChatGPT Plus offers better image generation and voice features, so many developers subscribe to both ($40/mo total) and use Claude for code, ChatGPT for everything else.</p>
             </div>
         </div>
 
         <div class="faq-item">
-            <div class="faq-question">7. How does Claude Pro compare to using the Claude API directly?</div>
+            <div class="faq-question" id="faq-how-does-claude-pro-compare-to-using-the-claude-api-directly">7. How does Claude Pro compare to using the Claude API directly?</div>
             <div class="faq-answer">
                 <p>Claude Pro is more cost-effective if you make more than 16-20 Opus interactions daily (500-800+ API calls per month). At $0.04 per interaction with Opus via API, you break even with Pro at 500 interactions/month. Pro also includes Projects, Artifacts, and the web UI, while the API requires custom integration. Choose API for low-volume usage, batch processing, automation, or when you need prompt caching (10% cost for cache hits). Choose Pro for high-volume interactive work with predictable monthly costs.</p>
             </div>
         </div>
 
         <div class="faq-item">
-            <div class="faq-question">8. Does Claude Pro include Claude Code?</div>
+            <div class="faq-question" id="faq-does-claude-pro-include-claude-code">8. Does Claude Pro include Claude Code?</div>
             <div class="faq-answer">
                 <p>Yes. Claude Code is included with Claude Pro, but it shares your usage quota with the web interface. This means heavy Claude Code sessions (multi-file refactoring, codebase analysis) consume your daily message limit quickly. Many developers find they need Max 5x ($100/mo) for sustained Claude Code usage throughout a workday. Free users have limited Claude Code access.</p>
             </div>
         </div>
 
         <div class="faq-item">
-            <div class="faq-question">9. What happens when I hit my Claude Pro usage limit?</div>
+            <div class="faq-question" id="faq-what-happens-when-i-hit-my-claude-pro-usage-limit">9. What happens when I hit my Claude Pro usage limit?</div>
             <div class="faq-answer">
                 <p>When you hit your 5-hour rolling window limit, you must wait until capacity replenishes. If you hit your weekly limit (introduced August 2025), you're completely blocked until your weekly reset day—typically 7 days from your subscription start date. This is the primary pain point Reddit developers cite. You can't pay to increase limits mid-cycle; your only option is upgrading to Max 5x or Max 20x, which resets your limits to the higher tier immediately.</p>
             </div>
         </div>
 
         <div class="faq-item">
-            <div class="faq-question">10. Is Claude Pro worth it for students and academic research?</div>
+            <div class="faq-question" id="faq-is-claude-pro-worth-it-for-students-and-academic-research">10. Is Claude Pro worth it for students and academic research?</div>
             <div class="faq-answer">
                 <p>Yes, particularly for graduate students and researchers. Claude's 200K context window handles entire research papers, dissertations, and literature reviews without losing context. It excels at analyzing academic papers, synthesizing research across multiple sources, and helping structure complex arguments. The $20/month cost is reasonable for serious academic work. However, always verify citations and don't rely on Claude for factual accuracy without checking primary sources.</p>
             </div>
         </div>
 
         <div class="faq-item">
-            <div class="faq-question">11. Can I share my Claude Pro subscription with teammates?</div>
+            <div class="faq-question" id="faq-can-i-share-my-claude-pro-subscription-with-teammates">11. Can I share my Claude Pro subscription with teammates?</div>
             <div class="faq-answer">
                 <p>No. Claude Pro is for individual use only. Account sharing violates the terms of service and risks account suspension. For team collaboration, use Claude Team ($25-30 per user/month depending on team size), which provides centralized billing, usage analytics, and proper access controls. For 2-3 people, it's often cheaper to each get individual Pro subscriptions ($20 each) than Team pricing.</p>
             </div>
         </div>
 
         <div class="faq-item">
-            <div class="faq-question">12. Will Claude Pro get cheaper or will usage limits increase?</div>
+            <div class="faq-question" id="faq-will-claude-pro-get-cheaper-or-will-usage-limits-increase">12. Will Claude Pro get cheaper or will usage limits increase?</div>
             <div class="faq-answer">
                 <p>Unknown, but historical trends are encouraging. API pricing has dropped significantly (Opus 4.5 at $5/$25 per million tokens vs Opus 4.1 at $15/$75—a 3× reduction). However, subscription pricing has remained stable at $20/month since launch. Usage limits have fluctuated based on server capacity. Anthropic's trajectory suggests better models at similar prices rather than price reductions, but usage limits may increase as infrastructure scales.</p>
             </div>
